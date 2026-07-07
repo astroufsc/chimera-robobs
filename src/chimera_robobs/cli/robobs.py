@@ -1122,10 +1122,20 @@ def cmd_process_queue(args) -> int:
 
 
 def _connect(args, location: str):
+    import threading
+    import time
+
     from chimera.core.bus import Bus
     from chimera.core.proxy import Proxy
 
     bus = Bus(f"tcp://{args.host}:{random.randint(10000, 60000)}")
+    # the client bus must run its receive loop, or replies never arrive
+    threading.Thread(target=bus.run_forever, daemon=True).start()
+    started = getattr(bus, "_bus_started", None)
+    if started is not None:
+        started.wait(5)
+    else:
+        time.sleep(0.5)
     url = f"tcp://{args.host}:{args.port}{location}"
     proxy = Proxy(url, bus)
     proxy.resolve()

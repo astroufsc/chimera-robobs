@@ -83,12 +83,27 @@ class RobObs(ChimeraObject):
             seeing=self._get_seeing if self["seeingmonitors"] is not None else None,
         )
 
-        self._connect_scheduler_events()
+        # event subscription happens on the first control() tick: during
+        # __start__ the bus is not serving yet, so proxies can't resolve
+        self._events_connected = False
 
         self.machine = Machine(self)
         self.machine.start()
 
         self._inject_instrument()
+
+    def control(self):
+        """One-shot: subscribe to scheduler events once the bus is up, then
+        stop the control loop (everything else is event-driven)."""
+        if self._events_connected:
+            return False
+        try:
+            self._connect_scheduler_events()
+            self._events_connected = True
+            return False
+        except Exception as e:
+            self.log.warning("could not subscribe to scheduler events yet: %s", e)
+            return True  # retry on the next tick
 
     def __stop__(self):
         self._disconnect_scheduler_events()
