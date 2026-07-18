@@ -50,13 +50,19 @@ class Recurrent(Higher):
 
         ntargets = query.count()
         # Exclude targets that were observed less than the specified amount
-        # of time ago.
+        # of time ago.  Blocks marked observed with no last_observation date
+        # (left over by simulations) stay eligible — recovered 2018 fix from
+        # the never-merged mysql branch ("Recurrent algorithm review").
         query = query.filter(
             or_(
                 ObsBlock.observed == False,  # noqa: E712
                 and_(
                     ObsBlock.observed == True,  # noqa: E712
                     ObsBlock.last_observation < reference_date,
+                ),
+                and_(
+                    ObsBlock.observed == True,  # noqa: E712
+                    ObsBlock.last_observation.is_(None),
                 ),
             )
         )

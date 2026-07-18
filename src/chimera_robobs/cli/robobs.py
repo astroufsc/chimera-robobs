@@ -861,7 +861,9 @@ def select_blocks(session, pid: str, lst_start: float, lst_end: float):
         query = query.filter(
             or_(
                 and_(Target.target_ra > lst_start, Target.target_ra < 24.0),
-                and_(Target.target_ra > 0.0, Target.target_ra < lst_end),
+                # >= so targets at exactly RA 0 are selectable (2018 fix from
+                # the never-merged wschoenell-patch-1 branch)
+                and_(Target.target_ra >= 0.0, Target.target_ra < lst_end),
             )
         )
     return query.order_by(desc(Target.target_ah))
@@ -1049,7 +1051,10 @@ def cmd_process_queue(args) -> int:
             program = session.merge(program_list[0])
             _out(f"slew@: {program.slew_at}")
 
-            aplen = calc_obs_time(session, program, 20.0)
+            # prefer the block length stored at ingest (recovered 2018 fix
+            # from the never-merged bugfix/block_length branch)
+            obs_block = session.merge(program_list[2])
+            aplen = obs_block.length or calc_obs_time(session, program, 20.0)
 
             msg = ""
             slew_at = float(program.slew_at)

@@ -188,6 +188,11 @@ def test_recurrent_process_filters_by_recurrence(session_factory, site):
     _add_block(
         session, ra_hours=11.0, blockid=3, sched_algorithm=3, observed_days_ago=30
     )  # old enough
+    # observed but with no last_observation date (simulation leftover):
+    # must stay eligible (recovered 2018 fix, mysql branch)
+    simulated = _add_block(session, ra_hours=11.5, blockid=4, sched_algorithm=3)
+    simulated.observed = True
+    session.commit()
 
     algorithms = build_algorithms(factory, site)
     obs_start, obs_end = _window()
@@ -201,7 +206,7 @@ def test_recurrent_process_filters_by_recurrence(session_factory, site):
 
     scheduled = {b for b in slots["blockid"] if b > 0}
     assert 2 not in scheduled  # observed 2 days ago, recurrence is 7
-    assert scheduled == {1, 3}
+    assert scheduled == {1, 3, 4}
 
 
 def test_recurrent_process_requires_recurrence(session_factory, algorithms):

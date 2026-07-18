@@ -111,7 +111,11 @@ class RobObsEngine:
 
             if program is not None:
                 self.log.debug("Found program %s", program[0])
-                length = block_duration(program[2].actions)
+                # prefer the length stored at ingest time (includes readout
+                # and focus overheads — recovered 2018 fix from the
+                # never-merged bugfix/block_length branch); fall back to the
+                # bare exposure sum for blocks without a stored length
+                length = program[2].length or block_duration(program[2].actions)
 
                 if not sched.timed_constraint and program[0].slew_at > nowmjd:
                     self.log.debug("Checking if program can be observed earlier...")
@@ -327,7 +331,9 @@ class RobObsEngine:
             moon_ra, moon_dec = self.site.moon_ra_dec(date_time)
             moon_alt, _ = self.site.ra_dec_to_alt_az(moon_ra, moon_dec, lst)
             moon_brightness = self.site.moon_phase(date_time) * 100.0
-            if blockpar.min_moon_bright < moon_brightness < blockpar.max_moon_bright:
+            # inclusive bounds: min/max are commonly set to exactly 0/100
+            # (recovered 2018 fix from the never-merged mysql branch)
+            if blockpar.min_moon_bright <= moon_brightness <= blockpar.max_moon_bright:
                 self.log.debug("\tMoon brightness:%.2f", moon_brightness)
             elif moon_alt < 0.0:
                 self.log.warning(

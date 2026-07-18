@@ -129,8 +129,8 @@ class Higher(BaseScheduleAlgorithm):
             if (
                 not (
                     moon_par["min_moon_bright"].max()
-                    < moon_brightness
-                    < moon_par["max_moon_bright"].min()
+                    <= moon_brightness
+                    <= moon_par["max_moon_bright"].min()
                 )
             ) and (moon_alt > 0.0):
                 log.warning(
@@ -174,8 +174,8 @@ class Higher(BaseScheduleAlgorithm):
                         moon_par["min_moon_distance"][index],
                         (
                             moon_par["min_moon_bright"][index]
-                            < moon_brightness
-                            < moon_par["max_moon_bright"][index]
+                            <= moon_brightness
+                            <= moon_par["max_moon_bright"][index]
                         )
                         or (moon_alt < 0.0),
                     )

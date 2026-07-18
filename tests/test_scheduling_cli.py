@@ -350,3 +350,17 @@ def test_select_blocks_lst_window(tmp_path, db):
     # wrap-around window (22h -> 2h)
     rows = cli.select_blocks(session, "P01", 22.0, 2.0)[:]
     assert sorted(r[2].target_ra for r in rows) == [1.0, 23.0]
+
+    # a target at exactly RA 0 must be selectable in a wrap-around window
+    # (lost 2018 fix from the wschoenell-patch-1 branch: > 0 excluded it)
+    target = model.Target(name="t-ra0", target_ra=0.0, target_dec=0.0)
+    session.add(target)
+    session.commit()
+    session.add(
+        model.ObsBlock(
+            target_id=target.id, blockid=9, pid="P01", block_par_id=blockpar.id
+        )
+    )
+    session.commit()
+    rows = cli.select_blocks(session, "P01", 22.0, 2.0)[:]
+    assert sorted(r[2].target_ra for r in rows) == [0.0, 1.0, 23.0]

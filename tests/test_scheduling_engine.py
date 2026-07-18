@@ -207,3 +207,43 @@ def test_lower_priority_program_fills_wait_slot(session_factory):
     assert selected is not None
     assert selected[0].id == low.id
     assert selected[0].id != high.id
+
+
+def test_moon_brightness_bounds_are_inclusive(session_factory):
+    """Recovered 2018 fix (mysql branch): with the common min/max of exactly
+    0/100, a new-moon (0%) or full-moon (100%) brightness must pass."""
+    session = session_factory()
+    _add_program(session, "P01", 1, slew_at=61000.0)
+    site = FakeSite(latitude=0.0, lst_rads=10.0 * math.pi / 12.0)
+    site._moon = (10.5, 5.0)  # moon above the horizon, far enough away
+    site._moon_phase = 0.0  # new moon: brightness exactly 0.0
+    engine = RobObsEngine(session_factory, site, log=LOG)
+
+    rows = (
+        session.query(model.Program, model.BlockPar, model.ObsBlock, model.Target)
+        .join(model.BlockPar, model.Program.blockpar_id == model.BlockPar.id)
+        .join(model.ObsBlock, model.Program.obsblock_id == model.ObsBlock.id)
+        .join(model.Target, model.Program.target_id == model.Target.id)
+        .one()
+    )
+    rows[1].min_moon_distance = 2.0
+    session.commit()
+
+    assert engine.check_conditions(rows, 61000.0)  # 0.0 is within [0, 100]
+
+    site._moon_phase = 1.0  # full moon: brightness exactly 100.0
+    assert engine.check_conditions(rows, 61000.0)
+
+
+def test_get_program_prefers_stored_block_length(session_factory):
+    """Recovered 2018 fix (bugfix/block_length): the length stored at ingest
+    (with readout/focus overheads) wins over the bare exposure sum."""
+    session = session_factory()
+    _add_program(session, "P01", 1, slew_at=61000.0)
+    block = session.query(model.ObsBlock).one()
+    block.length = 84.0  # 2 x (30 s + 12 s readout)
+    session.commit()
+
+    engine, site = _engine(session_factory)
+    _, length = engine.get_program(site.mjd(), 1)
+    assert length == pytest.approx(84.0)
