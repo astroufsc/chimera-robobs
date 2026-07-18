@@ -508,10 +508,12 @@ class Expose(Action):
     window = Column(String, default=None)
 
     shutter = Column(String, default="OPEN")
+    wait_dome = Column(Boolean, default=True)
 
     image_type = Column(String, default="")
     filename = Column(String, default="$DATE-$TIME")
     object_name = Column(String, default="")
+    compress_format = Column(String, default="NO")
 
     def __str__(self):
         return (
@@ -529,9 +531,11 @@ class Expose(Action):
         ca.binning = self.binning
         ca.window = self.window
         ca.shutter = self.shutter
+        ca.wait_dome = self.wait_dome
         ca.image_type = self.image_type
         ca.filename = self.filename
         ca.object_name = self.object_name
+        ca.compress_format = self.compress_format
         return ca
 
 

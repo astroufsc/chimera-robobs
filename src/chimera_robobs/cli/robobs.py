@@ -103,12 +103,27 @@ LEGACY_ACTION_KEYS = {
     "targetName": "target_name",
 }
 
-#: legacy CSV column names -> Target columns
+#: pid-config (make-queue --pid-config) keys understood by the scheduling
+#: algorithms; anything else is reported and ignored
+PID_CONFIG_KEYS = {
+    "pid",
+    "slotLen",
+    "pool_size",
+    "max_sched_blocks",
+    "nstars",
+    "nairmass",
+    "recurrence",
+    "times",
+}
+
+#: legacy CSV column names -> Target columns.  The production pointing CSVs
+#: spell the epoch column ``EPOC`` (no H); both spellings are accepted.
 TARGET_CSV_COLUMNS = {
     "name": "name",
     "type": "type",
     "mag": "target_mag",
     "epoch": "target_epoch",
+    "epoc": "target_epoch",
     "magfilter": "mag_filter",
     "link": "link",
 }
@@ -181,10 +196,11 @@ def upsert_project(session, config) -> Project:
 
     if "observing_blocks" in config:
         _out(f"--Found {len(config['observing_blocks'])} blocks.")
-        for observing_block in config["observing_blocks"]:
+        for index, observing_block in enumerate(config["observing_blocks"]):
             block_config = config["observing_blocks"][observing_block]
-            b_id = block_config["id"]
-            b_pid = block_config["pid"]
+            # some production project files omit id/pid in the block section
+            b_id = block_config.get("id", index)
+            b_pid = block_config.get("pid", pid)
             block = (
                 session.query(BlockPar)
                 .filter(BlockPar.bid == b_id)
@@ -200,12 +216,14 @@ def upsert_project(session, config) -> Project:
                 _out(f"---Block {b_pid}.{b_id} already in database. Updating...")
 
             for key, value in block_config.items():
-                if key in ("id", "pid"):
+                if key in ("id", "pid", "name"):
                     continue
                 column = LEGACY_BLOCKPAR_KEYS.get(key, key)
                 if column in BLOCKPAR_FIELDS:
                     _out(f" {column}: {value}")
                     setattr(block, column, value)
+                else:
+                    _out(f"---Ignoring unknown block key: {key}")
             if add:
                 session.add(block)
         session.commit()
@@ -312,7 +330,7 @@ def add_targets_from_table(session, targets_table) -> int:
 
     Returns the number of targets added.  Does not check for duplicates.
     """
-    columns = {name.lower(): name for name in targets_table.dtype.names}
+    columns = {name.lower().strip(): name for name in targets_table.dtype.names}
 
     for required in ("ra", "dec"):
         if required not in columns:
@@ -320,12 +338,16 @@ def add_targets_from_table(session, targets_table) -> int:
                 f"Required parameter, {required}, missing from input file..."
             )
 
+    ignored = sorted(set(columns) - set(TARGET_CSV_COLUMNS) - {"ra", "dec"})
+    if ignored:
+        _out(f"-Ignoring unknown columns: {', '.join(ignored)}")
+
     nadded = 0
     for i in range(len(targets_table)):
-        ra = targets_table[columns["ra"]][i]
-        dec = targets_table[columns["dec"]][i]
+        ra = str(targets_table[columns["ra"]][i]).strip()
+        dec = str(targets_table[columns["dec"]][i]).strip()
         try:
-            position = Position.from_ra_dec(str(ra), str(dec))
+            position = Position.from_ra_dec(ra, dec)
         except ValueError:
             _err(
                 f"*Object in line {i} has invalid coordinates ({ra},{dec}). Skipping..."
@@ -337,16 +359,17 @@ def add_targets_from_table(session, targets_table) -> int:
             if csv_name in columns:
                 value = targets_table[columns[csv_name]][i]
                 if column in ("target_mag", "target_epoch"):
+                    # the production CSVs write epochs like "2000."
                     tpar[column] = float(value)
                 else:
-                    tpar[column] = str(value)
+                    tpar[column] = str(value).strip()
 
         target = Target(**tpar)
         _out(f"--Adding {target.name}...")
         session.add(target)
-        session.commit()
         nadded += 1
 
+    session.commit()
     return nadded
 
 
@@ -879,6 +902,10 @@ def cmd_make_queue(args) -> int:
             _err(str(exc))
             return 1
     pgrconfig.setdefault("pid", args.pid)
+    for key in sorted(set(pgrconfig) - PID_CONFIG_KEYS):
+        # e.g. the legacy T80S/LNA past_meridian_only key, which was never
+        # implemented: parsed but visibly ignored
+        _err(f"*Ignoring unsupported pid-config key: {key}")
 
     _out(f"-Selecting targets from project {args.pid}")
 
