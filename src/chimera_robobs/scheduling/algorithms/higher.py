@@ -285,7 +285,7 @@ class Higher(BaseScheduleAlgorithm):
 
         return obs_slots
 
-    def next(self, now_mjd, programs):
+    def next(self, now_mjd, programs, check=None):
         programs = programs[:]
         if len(programs) == 0:
             return None

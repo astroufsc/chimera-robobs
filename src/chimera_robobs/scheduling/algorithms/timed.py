@@ -59,7 +59,7 @@ class Timed(Higher):
         finally:
             session.commit()
 
-    def next(self, now_mjd, programs):
+    def next(self, now_mjd, programs, check=None):
         session = self.session()
 
         try:
@@ -74,14 +74,41 @@ class Timed(Higher):
             if timed_observation is None:
                 return None
 
-            program_list = super().next(now_mjd, programs)
+            execute_at = timed_observation.execute_at
 
-            # Again, use higher to select a target but replace slew_at with
-            # execute_at — on the caller's row: setting it on a merged copy
-            # in this session left the caller holding the stale slot time
-            # (seen live: the timed program executed at its slot time
-            # instead of the requested one).
-            program_list[0].slew_at = timed_observation.execute_at
+            # Walk the candidates in Higher order (slot time closest to
+            # now) and take the first whose target is actually observable
+            # at the requested execution time.  The legacy code committed
+            # to the single closest candidate and gave the night's request
+            # up when it failed a condition (seen live: the focus standard
+            # closest in time sat 0.7 deg inside its own moon limit while
+            # 60 others were fine).
+            candidates = sorted(
+                programs[:], key=lambda row: abs(now_mjd - row[0].slew_at)
+            )
+            program_list = None
+            for row in candidates:
+                if check is None or check(row, execute_at, row[2].length or 0.0):
+                    program_list = row
+                    break
+                log.info(
+                    "Timed candidate %s not observable @ %.3f; trying the next one.",
+                    row[0],
+                    execute_at,
+                )
+            if program_list is None:
+                log.warning(
+                    "No timed candidate observable @ %.3f (%i tried).",
+                    execute_at,
+                    len(candidates),
+                )
+                return None
+
+            # Replace the slot slew time with the requested execution time —
+            # on the caller's row: setting it on a merged copy in this
+            # session left the caller holding the stale slot time (also
+            # seen live).
+            program_list[0].slew_at = execute_at
 
             timed_observation.target_id = program_list[0].target_id
             timed_observation.block_id = program_list[2].id

@@ -108,7 +108,7 @@ class RobObsEngine:
         for sal in sorted(unique_sched_algorithms):
             sched = self.algorithms[sal]
 
-            program = sched.next(nowmjd, programs)
+            program = sched.next(nowmjd, programs, check=self.check_conditions)
 
             if program is not None:
                 self.log.debug("Found program %s", program[0])

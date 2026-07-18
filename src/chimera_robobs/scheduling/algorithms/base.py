@@ -71,8 +71,15 @@ class BaseScheduleAlgorithm:
         """
         raise NotImplementedError()
 
-    def next(self, now_mjd, programs):
-        """Select the next program to observe with this algorithm."""
+    def next(self, now_mjd, programs, check=None):
+        """Select the next program to observe with this algorithm.
+
+        :param check: optional condition checker
+            ``check(program_row, mjd, program_length) -> bool`` supplied by
+            the engine; algorithms that reschedule a program to a different
+            time can use it to skip candidates that would not be observable
+            there.
+        """
         raise NotImplementedError()
 
     def observed(self, time, program, soft=False):

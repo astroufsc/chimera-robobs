@@ -391,3 +391,65 @@ def test_past_meridian_only_handles_ra_wrap(session_factory):
     scheduled = [b for b in slots["blockid"] if b > 0]
     # RA 0.1 h is higher in the sky but still east: RA 23.5 h must win
     assert scheduled and scheduled[0] == 1
+
+
+def test_timed_next_falls_back_when_candidate_fails_conditions(session_factory):
+    """Recovered-from-live improvement: if the closest candidate is not
+    observable at execute_at (e.g. inside its moon limit), Timed tries the
+    next one instead of giving the request up for the night."""
+    from chimera_robobs.scheduling.engine import RobObsEngine
+
+    factory = session_factory
+    session = factory()
+    # fake moon sits at RA 12 h, dec 0: the RA 12.2 h target is ~3 deg away
+    # (fails min_moon_distance 30), the RA 9 h target is ~45 deg away
+    near_moon = _add_block(session, ra_hours=12.2, blockid=1, sched_algorithm=2)
+    far_moon = _add_block(session, ra_hours=9.0, blockid=2, sched_algorithm=2)
+    for blockpar in session.query(model.BlockPar):
+        blockpar.min_moon_distance = 30.0
+    session.commit()
+
+    site = RotatingSite(latitude=0.0, lst_rads=10.0 * math.pi / 12.0, ut_now=UT)
+    now = site.mjd()
+    execute_at = now + 0.02
+
+    programs = []
+    for i, block in enumerate((near_moon, far_moon)):
+        target = session.query(model.Target).get(block.target_id)
+        blockpar = session.query(model.BlockPar).get(block.block_par_id)
+        program = model.Program(
+            target_id=target.id,
+            name=target.name,
+            priority=1,
+            # the near-moon target's slot is closest to "now": the legacy
+            # behavior would commit to it and fail
+            slew_at=now + i * 0.01,
+            pid="P01",
+            obsblock_id=block.id,
+            blockpar_id=blockpar.id,
+        )
+        session.add(program)
+        programs.append(program)
+    session.add(model.TimedDB(pid="P01", execute_at=execute_at))
+    session.commit()
+
+    engine = RobObsEngine(factory, site, algorithms=build_algorithms(factory, site))
+
+    chosen, _ = engine.get_program(now, 1)
+    assert chosen is not None
+    # the far-from-moon target won although the near one was closer in time
+    assert chosen[0].id == programs[1].id
+    assert chosen[0].slew_at == pytest.approx(execute_at)
+
+    # bookkeeping follows the actually-chosen candidate
+    session = factory()
+    timed = session.query(model.TimedDB).one()
+    assert timed.target_id == far_moon.target_id
+    assert timed.block_id == far_moon.id
+
+    # and when NO candidate is observable, the request yields nothing
+    for blockpar in session.query(model.BlockPar):
+        blockpar.min_moon_distance = 179.0
+    session.commit()
+    chosen, _ = engine.get_program(now, 1)
+    assert chosen is None

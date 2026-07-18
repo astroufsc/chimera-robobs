@@ -395,7 +395,7 @@ class ExtinctionMonitor(BaseScheduleAlgorithm):
 
         return obs_slots
 
-    def next(self, now_mjd, programs):
+    def next(self, now_mjd, programs, check=None):
         log.debug("Selecting target with ExtinctionMonitor algorithm.")
 
         site = self.site
