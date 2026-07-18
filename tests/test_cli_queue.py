@@ -164,6 +164,7 @@ def test_every_subcommand_has_help():
         "clean-queue",
         "process-queue",
         "observing-log",
+        "migrate-config",
         "start",
         "stop",
         "wake",

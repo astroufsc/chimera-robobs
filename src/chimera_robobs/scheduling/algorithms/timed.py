@@ -11,7 +11,7 @@ override the selected program's ``slew_at``.
 
 import logging
 
-from chimera_robobs.scheduling.algorithms.base import TimedError
+from chimera_robobs.scheduling.algorithms.base import TimedError, normalize_config
 from chimera_robobs.scheduling.algorithms.higher import Higher
 from chimera_robobs.scheduling.dates import MJD_JD_OFFSET
 from chimera_robobs.scheduling.model import TimedDB
@@ -28,7 +28,8 @@ class Timed(Higher):
     def process(self, *, obs_start, obs_end, query, config=None, slot_len=None):
         # Try to read times from the configuration. If none is provided,
         # raise an exception.
-        if config is None:
+        config = normalize_config(config)
+        if not config:
             raise TimedError("No configuration file provided.")
 
         execute_at_mjds = [

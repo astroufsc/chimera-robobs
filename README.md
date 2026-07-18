@@ -53,6 +53,7 @@ chimera-robobs process-queue            # offline simulation of a night
 chimera-robobs observing-log [--start 2026/07/06-18:00:00]
 chimera-robobs clean-queue --pid PID
 chimera-robobs delete-project --pid PID
+chimera-robobs migrate-config legacy.yaml [-o outdir]
 ```
 
 Controller control (needs a running chimera server):
@@ -61,11 +62,38 @@ Controller control (needs a running chimera server):
 chimera-robobs [--host H --port P --robobs /RobObs/0] start | stop | wake | monitor
 ```
 
-The project YAML (`project:` + `observing_blocks:`), block YAML
-(`pre-actions`/`pos-actions`) and targets CSV formats are unchanged from the
-legacy tool; legacy key names (`maxairmass`, `imageType`, `EPOC`, ...) are
-still accepted.  The legacy pid-config key `past_meridian_only` is parsed
-but **not implemented** (as in the port; a warning is printed).
+## Input files
+
+The canonical YAML dialect is snake_case with readable algorithm names
+(mirroring the chimera-supervisor 2.0 configuration style).  Project files:
+
+```yaml
+project:
+  pid: ETACAR
+  pi: A. Investigator
+  abstract: Eta-carinae long term observations
+  url: www.lna.br
+  priority: 20
+observing_blocks:
+  block 1:
+    id: 0
+    max_airmass: 3.0
+    min_moon_distance: 40.0
+    max_seeing: 1.5
+    scheduling_algorithm: recurrent   # higher | extinction_monitor | timed
+                                      # | recurrent | time_sequence
+```
+
+Block files use `pre_actions:` (before the slew to the target) and
+`post_actions:` (after it) with snake_case action keys (`image_type`,
+`object_name`, ...); pid-config files use `slot_len`, `n_stars`,
+`n_airmass`, `pool_size`, `recurrence`, `times`.
+
+The legacy dialect (`schedalgorith: 3`, `maxairmass`, `imageType`,
+`pos-actions`, `slotLen`, `EPOC` CSV headers, ...) is still accepted
+everywhere, and `chimera-robobs migrate-config` converts legacy files to
+the canonical form.  The legacy pid-config key `past_meridian_only` is
+parsed but **not implemented** (as in the port; a warning is printed).
 
 ## Development
 

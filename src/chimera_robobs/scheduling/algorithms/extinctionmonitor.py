@@ -17,6 +17,7 @@ from chimera_robobs.scheduling.algorithms.base import (
     BaseScheduleAlgorithm,
     ExtinctionMonitorError,
     airmass,
+    normalize_config,
 )
 from chimera_robobs.scheduling.dates import datetime_from_jd, datetime_from_mjd
 from chimera_robobs.scheduling.model import ExtMoniDB, ObservedAM, block_duration
@@ -96,7 +97,7 @@ class ExtinctionMonitor(BaseScheduleAlgorithm):
         slot_len=None,
         overheads=None,
     ):
-        config = config or {}
+        config = normalize_config(config)
         slot_len = self._slot_len(config, slot_len)
         site = self.site
 
@@ -109,8 +110,8 @@ class ExtinctionMonitor(BaseScheduleAlgorithm):
         time_grid = np.arange(nightstart, nightend, slot_len / 60.0 / 60.0 / 24.0)
         rows = query[:]
 
-        nstars = config.get("nstars", 3)
-        nairmass = config.get("nairmass", 3)
+        nstars = config.get("n_stars", 3)
+        nairmass = config.get("n_airmass", 3)
 
         default_overheads = {
             "autofocus": {"align": 0.0, "set": 0.0},

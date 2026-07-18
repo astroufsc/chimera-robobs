@@ -1,0 +1,20 @@
+# canonical (post-migration) dialect: snake_case keys, readable algorithm name
+project:
+  pid: CANON
+  pi: A. Investigator
+  abstract: canonical dialect project
+  url: http://example.org/canon
+  priority: 5
+observing_blocks:
+  block 1:
+    id: 1
+    pid: CANON
+    max_airmass: 1.9
+    min_airmass: 1.0
+    max_moon_bright: 99.0
+    min_moon_bright: 0.0
+    min_moon_distance: 25.0
+    max_seeing: 2.5
+    cloud_cover: 1
+    scheduling_algorithm: recurrent
+    apply_ext_corr: false

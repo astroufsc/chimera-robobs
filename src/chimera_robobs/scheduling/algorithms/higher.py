@@ -16,6 +16,7 @@ from chimera.util.position import Position
 from chimera_robobs.scheduling.algorithms.base import (
     BaseScheduleAlgorithm,
     airmass,
+    normalize_config,
 )
 from chimera_robobs.scheduling.dates import SECONDS_PER_DAY, datetime_from_jd
 from chimera_robobs.scheduling.model import ObsBlock
@@ -52,7 +53,7 @@ class Higher(BaseScheduleAlgorithm):
     check_end_airmass = True
 
     def process(self, *, obs_start, obs_end, query, config=None, slot_len=None):
-        config = config or {}
+        config = normalize_config(config)
         slot_len = self._slot_len(config, slot_len)
         pool_size = int(config.get("pool_size", 1))
         max_sched_blocks = int(config.get("max_sched_blocks", -1))

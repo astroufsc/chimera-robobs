@@ -180,3 +180,14 @@ observinglog), the recurrent table renamed `recurrentdb`, model classes
 `Targets`/`Projects` renamed `Target`/`Project` (table names unchanged),
 `Expose` gained `compress_format`/`wait_dome` (used by every production
 block file).  See `docs/plans/deep-refactor.md`.
+
+## Canonical input dialect (2026-07, supervisor-style)
+
+The YAML inputs gained a canonical snake_case dialect mirroring the
+chimera-supervisor 2.0 configuration style: `scheduling_algorithm` takes a
+readable name (`higher`/`extinction_monitor`/`timed`/`recurrent`/
+`time_sequence`) instead of a numeric id, block files use
+`pre_actions`/`post_actions`, pid-config uses `slot_len`/`n_stars`/
+`n_airmass`.  The legacy dialect is still accepted everywhere and
+`chimera-robobs migrate-config` converts legacy files to the canonical
+form.

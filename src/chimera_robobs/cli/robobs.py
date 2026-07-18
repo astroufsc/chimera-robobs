@@ -15,6 +15,7 @@ Offline commands (operate directly on the robobs database):
     chimera-robobs delete-observing-block --pid PID
     chimera-robobs clean-queue --pid PID
     chimera-robobs observing-log [--start ...] [--end ...]
+    chimera-robobs migrate-config file.yaml [-o outdir]
 
 Commands that talk to a running chimera server:
 
@@ -22,9 +23,11 @@ Commands that talk to a running chimera server:
     chimera-robobs process-queue [time options]        (offline simulation)
     chimera-robobs start | stop | wake | monitor
 
-The YAML/CSV input formats are compatible with the legacy chimera-robobs
-tool; legacy key names (``maxairmass``, ``imageType``, ...) are accepted and
-mapped to the new database column names.
+The canonical YAML dialect is snake_case with readable algorithm names
+(``scheduling_algorithm: recurrent``, ``pre_actions``/``post_actions``,
+``slot_len``); the legacy dialect (``schedalgorith: 3``, ``maxairmass``,
+``imageType``, ``pos-actions``, ``slotLen``, ...) is still accepted, and
+``migrate-config`` converts legacy files to the canonical form.
 """
 
 import argparse
@@ -44,7 +47,12 @@ from chimera.util.coord import Coord
 from chimera.util.position import Position
 from sqlalchemy import and_, desc, or_
 
-from chimera_robobs.scheduling.algorithms import build_algorithms
+from chimera_robobs.scheduling.algorithms import (
+    ALGORITHM_YAML_NAMES,
+    build_algorithms,
+    parse_algorithm_id,
+)
+from chimera_robobs.scheduling.algorithms.base import LEGACY_CONFIG_KEYS
 from chimera_robobs.scheduling.dates import (
     MJD_JD_OFFSET,
     SECONDS_PER_DAY,
@@ -81,7 +89,8 @@ ACTION_TYPES = {
     "expose": Expose,
 }
 
-#: legacy YAML block-parameter keys -> new column names (new names also accepted)
+#: legacy YAML block-parameter keys -> new column names (new names also
+#: accepted); ``scheduling_algorithm`` is the canonical readable spelling
 LEGACY_BLOCKPAR_KEYS = {
     "maxairmass": "max_airmass",
     "minairmass": "min_airmass",
@@ -91,6 +100,7 @@ LEGACY_BLOCKPAR_KEYS = {
     "maxseeing": "max_seeing",
     "cloudcover": "cloud_cover",
     "schedalgorith": "sched_algorithm",
+    "scheduling_algorithm": "sched_algorithm",
     "applyextcorr": "apply_ext_corr",
 }
 
@@ -104,13 +114,17 @@ LEGACY_ACTION_KEYS = {
 }
 
 #: pid-config (make-queue --pid-config) keys understood by the scheduling
-#: algorithms; anything else is reported and ignored
+#: algorithms (canonical snake_case plus the accepted legacy spellings);
+#: anything else is reported and ignored
 PID_CONFIG_KEYS = {
     "pid",
+    "slot_len",
     "slotLen",
     "pool_size",
     "max_sched_blocks",
+    "n_stars",
     "nstars",
+    "n_airmass",
     "nairmass",
     "recurrence",
     "times",
@@ -220,6 +234,10 @@ def upsert_project(session, config) -> Project:
                     continue
                 column = LEGACY_BLOCKPAR_KEYS.get(key, key)
                 if column in BLOCKPAR_FIELDS:
+                    if column == "sched_algorithm":
+                        # canonical: a readable name ("recurrent"); legacy
+                        # numeric ids are still accepted
+                        value = parse_algorithm_id(value)
                     _out(f" {column}: {value}")
                     setattr(block, column, value)
                 else:
@@ -533,6 +551,14 @@ INGEST_READOUT_OVERHEAD = 12.0
 INGEST_AUTOFOCUS_OVERHEAD = 600.0
 
 
+def _action_section(config, *names) -> list:
+    """Return the first present action list among the accepted spellings."""
+    for name in names:
+        if name in config:
+            return config[name] or []
+    return []
+
+
 def add_observing_block(session, row, config) -> ObsBlock | None:
     """Add (or replace) one observing block from a block-list row.
 
@@ -581,8 +607,8 @@ def add_observing_block(session, row, config) -> ObsBlock | None:
         block_par_id=blockpar.id,
     )
 
-    # process pre-slew actions
-    for actconfig in config.get("pre-actions", []):
+    # process pre-slew actions (canonical: pre_actions; legacy: pre-actions)
+    for actconfig in _action_section(config, *PRE_ACTION_KEYS):
         act = _make_action(actconfig, target, addblock, with_offsets=False)
         addblock.actions.append(act)
 
@@ -593,9 +619,9 @@ def add_observing_block(session, row, config) -> ObsBlock | None:
     addblock.actions.append(slewto)
     _out(f"Slew to: {target.name} ({slewto})")
 
-    # process post-slew actions
+    # process post-slew actions (canonical: post_actions; legacy: pos-actions)
     post_actions = []
-    for actconfig in config.get("pos-actions", []):
+    for actconfig in _action_section(config, *POST_ACTION_KEYS):
         act = _make_action(actconfig, target, addblock, with_offsets=True)
         post_actions.append(act)
         addblock.actions.append(act)
@@ -750,6 +776,95 @@ def cmd_observing_log(args) -> int:
     for entry in query:
         _out(f"{entry}")
     return 0
+
+
+# ----------------------------------------------------------------------
+# configuration migration (legacy dialect -> canonical snake_case)
+# ----------------------------------------------------------------------
+
+#: block-file section spellings, canonical first
+PRE_ACTION_KEYS = ("pre_actions", "pre-actions")
+POST_ACTION_KEYS = ("post_actions", "pos-actions", "post-actions")
+
+
+def _migrate_blockpar(block_config: dict) -> dict:
+    converted = {}
+    for key, value in block_config.items():
+        if key in ("id", "pid", "name"):
+            converted[key] = value
+            continue
+        column = LEGACY_BLOCKPAR_KEYS.get(key, key)
+        if column == "sched_algorithm":
+            # numeric ids become readable names (supervisor style)
+            converted["scheduling_algorithm"] = ALGORITHM_YAML_NAMES[
+                parse_algorithm_id(value)
+            ]
+        elif column == "apply_ext_corr":
+            converted[column] = bool(value)
+        else:
+            converted[column] = value
+    return converted
+
+
+def _migrate_action(actconfig: dict) -> dict:
+    return {LEGACY_ACTION_KEYS.get(key, key): value for key, value in actconfig.items()}
+
+
+def migrate_config_document(doc: dict) -> tuple[str, dict]:
+    """Convert a legacy project / block / pid-config YAML document to the
+    canonical snake_case dialect.  Returns ``(kind, converted)``."""
+    if "project" in doc:
+        converted = {"project": doc["project"]}
+        if "observing_blocks" in doc:
+            converted["observing_blocks"] = {
+                name: _migrate_blockpar(block)
+                for name, block in doc["observing_blocks"].items()
+            }
+        return "project", converted
+
+    if any(key in doc for key in PRE_ACTION_KEYS + POST_ACTION_KEYS):
+        converted = {}
+        pre = _action_section(doc, *PRE_ACTION_KEYS)
+        post = _action_section(doc, *POST_ACTION_KEYS)
+        if pre:
+            converted["pre_actions"] = [_migrate_action(a) for a in pre]
+        if post:
+            converted["post_actions"] = [_migrate_action(a) for a in post]
+        return "block", converted
+
+    return "pid-config", {
+        LEGACY_CONFIG_KEYS.get(key, key): value for key, value in doc.items()
+    }
+
+
+def cmd_migrate_config(args) -> int:
+    """Convert legacy YAML input files to the canonical snake_case dialect
+    (numeric ``schedalgorith`` codes become readable algorithm names)."""
+    import pathlib
+
+    status = 0
+    outdir = pathlib.Path(args.output) if args.output else None
+    if outdir:
+        outdir.mkdir(parents=True, exist_ok=True)
+
+    for target in args.files:
+        path = pathlib.Path(target)
+        try:
+            doc = _load_yaml(str(path))
+            kind, converted = migrate_config_document(doc)
+        except (OSError, yaml.YAMLError, ValueError, KeyError) as e:
+            _err(f"FAIL  {path}: {e}")
+            status = 1
+            continue
+        text = yaml.safe_dump(converted, sort_keys=False, default_flow_style=False)
+        if outdir:
+            destination = outdir / path.name
+            destination.write_text(text)
+            _err(f"OK    {path} -> {destination} ({kind})")
+        else:
+            _out(f"# migrated {kind} file from {path}")
+            _out(text)
+    return status
 
 
 # ----------------------------------------------------------------------
@@ -1323,6 +1438,19 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--start", default=None, help="only entries after this time")
     p.add_argument("--end", default=None, help="only entries up to this time")
     p.set_defaults(func=cmd_observing_log)
+
+    p = sub.add_parser(
+        "migrate-config",
+        help="convert legacy YAML input files to the canonical snake_case dialect",
+    )
+    p.add_argument("files", nargs="+", help="project / block / pid-config YAML files")
+    p.add_argument(
+        "-o",
+        "--output",
+        default=None,
+        help="write converted files to this directory (default: print to stdout)",
+    )
+    p.set_defaults(func=cmd_migrate_config)
 
     for name, func, doc in (
         ("start", cmd_start, "switch the robobs controller on"),

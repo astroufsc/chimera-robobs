@@ -1,0 +1,16 @@
+# canonical (post-migration) dialect: pre_actions/post_actions, snake keys
+pre_actions:
+  - action: expose
+    frames: 1
+    exptime: 0
+    image_type: BIAS
+    shutter: CLOSE
+    filename: "bias-{name}"
+post_actions:
+  - action: expose
+    filter: R
+    frames: 2
+    exptime: 20.5
+    image_type: OBJECT
+    object_name: "{name}"
+    filename: "{pid}-{name}"

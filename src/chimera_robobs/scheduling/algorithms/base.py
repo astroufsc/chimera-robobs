@@ -35,6 +35,22 @@ def airmass(alt: float) -> float:
     return am
 
 
+#: legacy pid-config key spellings -> canonical snake_case keys
+LEGACY_CONFIG_KEYS = {
+    "slotLen": "slot_len",
+    "nstars": "n_stars",
+    "nairmass": "n_airmass",
+}
+
+
+def normalize_config(config: dict | None) -> dict:
+    """Return a copy of a pid-config mapping with canonical snake_case keys
+    (the legacy ``slotLen``/``nstars``/``nairmass`` spellings are folded in)."""
+    if not config:
+        return {}
+    return {LEGACY_CONFIG_KEYS.get(key, key): value for key, value in config.items()}
+
+
 class BaseScheduleAlgorithm:
     """Contract shared by all scheduling algorithms.
 
@@ -65,9 +81,8 @@ class BaseScheduleAlgorithm:
         :param obs_start: start of the observing window (JD).
         :param obs_end: end of the observing window (JD).
         :param query: ``(ObsBlock, BlockPar, Target)`` row query.
-        :param config: parsed pid-config mapping (may carry ``slotLen``,
-            which overrides ``slot_len`` — legacy YAML key, kept for input
-            compatibility).
+        :param config: parsed pid-config mapping (a ``slot_len`` key — or
+            the legacy ``slotLen`` spelling — overrides ``slot_len``).
         :param slot_len: slot length in seconds.
         """
         raise NotImplementedError()
@@ -89,10 +104,11 @@ class BaseScheduleAlgorithm:
         """Soft clean: erase only information about past observations."""
 
     def _slot_len(self, config, slot_len):
-        """Resolve the slot length: pid-config ``slotLen`` wins, then the
-        caller's ``slot_len``, then the per-algorithm default."""
-        if config and "slotLen" in config:
-            return float(config["slotLen"])
+        """Resolve the slot length: the pid-config ``slot_len`` wins, then
+        the caller's ``slot_len``, then the per-algorithm default.
+        ``config`` must already be normalized (see :func:`normalize_config`)."""
+        if config and "slot_len" in config:
+            return float(config["slot_len"])
         if slot_len is not None:
             return float(slot_len)
         return self.default_slot_len
