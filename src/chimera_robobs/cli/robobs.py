@@ -813,6 +813,19 @@ def _pair_observing_log(session, entries, start_marker, end_marker) -> list[dict
                 .filter(Program.target_id == entry.target_id)
                 .first()
             )
+            # sky-flat blocks point at a placeholder target (often below the
+            # horizon at flat time): the plot draws them at the flat
+            # position altitude instead of the placeholder's track
+            is_flat = False
+            if queue_program is not None:
+                blockpar = (
+                    session.query(BlockPar)
+                    .filter(BlockPar.id == queue_program.blockpar_id)
+                    .first()
+                )
+                is_flat = (
+                    blockpar is not None and blockpar.sched_algorithm == SkyFlat.id
+                )
             current = {
                 "name": target.name,
                 "pid": queue_program.pid if queue_program is not None else None,
@@ -821,6 +834,7 @@ def _pair_observing_log(session, entries, start_marker, end_marker) -> list[dict
                 "start": entry.time,
                 "end": None,
                 "aborted": False,
+                "flat": is_flat,
             }
         elif end_marker in entry.action and current is not None:
             current["end"] = entry.time
@@ -906,7 +920,12 @@ def cmd_plot_log(args) -> int:
                 program["start"] + dt.timedelta(minutes=i)
                 for i in range(max(minutes, 1) + 1)
             ]
-            alts = [altitude(program["ra"], program["dec"], t) for t in grid]
+            if program.get("flat"):
+                # sky flats: fixed band at the flat position altitude (the
+                # placeholder target's own track is meaningless)
+                alts = [80.0] * len(grid)
+            else:
+                alts = [altitude(program["ra"], program["dec"], t) for t in grid]
 
             group = program["pid"] or program["name"]
             label = None if group in colors else group
@@ -921,7 +940,11 @@ def cmd_plot_log(args) -> int:
                 program["name"],
                 fontsize=7,
                 color=colors[group],
+                clip_on=True,
             )
+
+            if program.get("flat"):
+                continue  # moon separations are meaningless for flats
 
             # hourly moon-distance annotations along the track
             target_pos = Position.from_ra_dec(program["ra"], program["dec"])
@@ -930,7 +953,7 @@ def cmd_plot_log(args) -> int:
                 separation = float(
                     target_pos.angsep(Position.from_ra_dec(moon_ra, moon_dec))
                 )
-                ax.text(t, alt, f"{separation:.0f}", fontsize=7)
+                ax.text(t, alt, f"{separation:.0f}", fontsize=7, clip_on=True)
 
         kind = "Simulation" if args.simulation else "Observed"
         ax.set_title(f"robobs {kind} — night of {obs_start.date()}")
