@@ -62,8 +62,8 @@ from chimera_robobs.scheduling.model import (
     Point,
     PointVerify,
     Program,
-    Projects,
-    Targets,
+    Project,
+    Target,
     open_database,
 )
 from chimera_robobs.scheduling.siteadapter import SiteAdapter
@@ -100,7 +100,7 @@ LEGACY_ACTION_KEYS = {
     "targetName": "target_name",
 }
 
-#: legacy CSV column names -> Targets columns
+#: legacy CSV column names -> Target columns
 TARGET_CSV_COLUMNS = {
     "name": "name",
     "type": "type",
@@ -152,7 +152,7 @@ def _load_yaml(path: str):
 # ----------------------------------------------------------------------
 
 
-def upsert_project(session, config) -> Projects:
+def upsert_project(session, config) -> Project:
     """Create or update a project (and its block parameters) from a parsed
     project YAML document."""
     if "project" not in config:
@@ -164,7 +164,7 @@ def upsert_project(session, config) -> Projects:
     url = config["project"]["url"]
     priority = config["project"]["priority"]
 
-    project = session.query(Projects).filter(Projects.pid == pid).first()
+    project = session.query(Project).filter(Project.pid == pid).first()
     if project is not None:
         _out(f"-Project {pid} already in database. Updating...")
         project.pi = pi
@@ -173,9 +173,7 @@ def upsert_project(session, config) -> Projects:
         project.priority = priority
     else:
         _out(f"-Adding {pid} to the database ...")
-        project = Projects(
-            pid=pid, pi=pi, abstract=abstract, url=url, priority=priority
-        )
+        project = Project(pid=pid, pi=pi, abstract=abstract, url=url, priority=priority)
         session.add(project)
 
     _out("-Reading observing block information...")
@@ -264,7 +262,7 @@ def cmd_delete_project(args) -> int:
         _out(f"--Deleting block {block.pid}.{block.bid} parameters...")
         session.delete(block)
 
-    projects = session.query(Projects).filter(Projects.pid == args.pid)
+    projects = session.query(Project).filter(Project.pid == args.pid)
     for project in projects:
         _out(f"--Deleting project {project.pid}")
         session.delete(project)
@@ -294,7 +292,7 @@ def cmd_clean_project(args) -> int:
         _out(f"--Deleting block {block.pid}.{block.bid} parameters...")
         session.delete(block)
 
-    for project in session.query(Projects).all():
+    for project in session.query(Project).all():
         _out(f"--Deleting project {project.pid}")
         session.delete(project)
 
@@ -342,7 +340,7 @@ def add_targets_from_table(session, targets_table) -> int:
                 else:
                     tpar[column] = str(value)
 
-        target = Targets(**tpar)
+        target = Target(**tpar)
         _out(f"--Adding {target.name}...")
         session.add(target)
         session.commit()
@@ -380,7 +378,7 @@ def cmd_clean_targets(args) -> int:
 
     session = _session_factory(args)()
 
-    ntargets = int(session.query(Targets).count())
+    ntargets = int(session.query(Target).count())
 
     if ntargets == 0:
         _out("-Target list is already empty")
@@ -390,7 +388,7 @@ def cmd_clean_targets(args) -> int:
 
     _out(f"-Deleting all {ntargets} targets from database")
 
-    for target in session.query(Targets).all():
+    for target in session.query(Target).all():
         session.delete(target)
 
     session.commit()
@@ -528,7 +526,7 @@ def add_observing_block(session, row, config) -> ObsBlock | None:
     """
     pid, blockid, target_id, _, bparid = row
 
-    target = session.query(Targets).filter(Targets.id == target_id).first()
+    target = session.query(Target).filter(Target.id == target_id).first()
     if target is None:
         raise ValueError(f"No target defined for specified block {blockid}.")
 
@@ -724,12 +722,12 @@ def cmd_observing_log(args) -> int:
 def _require_project(session, pid: str | None) -> bool:
     if not pid:
         _err("*Specify project id (--pid). Available options are:")
-        for project in session.query(Projects):
+        for project in session.query(Project):
             _err(f"**{project.pid}")
         return False
-    if session.query(Projects).filter(Projects.pid == pid).count() == 0:
+    if session.query(Project).filter(Project.pid == pid).count() == 0:
         _err(f"*No project named {pid} on the database. Available options are:")
-        for project in session.query(Projects):
+        for project in session.query(Project):
             _err(f"**{project.pid}")
         return False
     return True
@@ -806,13 +804,13 @@ def make_times(args, site: SiteAdapter) -> SimpleNamespace:
 def select_blocks(session, pid: str, lst_start: float, lst_end: float):
     """Query the not-yet-scheduled blocks of a project inside an LST window.
 
-    Returns a query of ``(ObsBlock, BlockPar, Targets)`` tuples ordered by
+    Returns a query of ``(ObsBlock, BlockPar, Target)`` tuples ordered by
     descending hour angle.
     """
     query = (
-        session.query(ObsBlock, BlockPar, Targets)
+        session.query(ObsBlock, BlockPar, Target)
         .join(BlockPar, ObsBlock.block_par_id == BlockPar.id)
-        .join(Targets, ObsBlock.target_id == Targets.id)
+        .join(Target, ObsBlock.target_id == Target.id)
         .filter(
             ObsBlock.pid == pid,
             BlockPar.pid == pid,
@@ -821,24 +819,24 @@ def select_blocks(session, pid: str, lst_start: float, lst_end: float):
         )
     )
     if lst_start < lst_end:
-        query = query.filter(Targets.target_ra > lst_start, Targets.target_ra < lst_end)
+        query = query.filter(Target.target_ra > lst_start, Target.target_ra < lst_end)
     else:
         query = query.filter(
             or_(
-                and_(Targets.target_ra > lst_start, Targets.target_ra < 24.0),
-                and_(Targets.target_ra > 0.0, Targets.target_ra < lst_end),
+                and_(Target.target_ra > lst_start, Target.target_ra < 24.0),
+                and_(Target.target_ra > 0.0, Target.target_ra < lst_end),
             )
         )
-    return query.order_by(desc(Targets.target_ah))
+    return query.order_by(desc(Target.target_ah))
 
 
 def add_observation(session, block_rows, obstime_jd: float) -> None:
-    """Create queue programs for every ``(ObsBlock, BlockPar, Targets)`` row."""
+    """Create queue programs for every ``(ObsBlock, BlockPar, Target)`` row."""
     programs = []
 
     for subblock in block_rows:
         obs_block, blockpar, target = subblock
-        project = session.query(Projects).filter(Projects.pid == obs_block.pid).first()
+        project = session.query(Project).filter(Project.pid == obs_block.pid).first()
         _out(f"\t @{obstime_jd - 2400000.5:.3f} - {target}")
         program = Program(
             target_id=obs_block.target_id,
@@ -857,11 +855,6 @@ def add_observation(session, block_rows, obstime_jd: float) -> None:
 
     session.add_all(programs)
     session.commit()
-
-
-def best_slot_len(pid: str) -> float:
-    """Slot length (minutes) used to build the queue (legacy hard-coded)."""
-    return 15.0
 
 
 def cmd_make_queue(args) -> int:
@@ -912,7 +905,7 @@ def cmd_make_queue(args) -> int:
         _out(f"-Observing time: {ohh:02d}:{omm:02d} h")
 
         # Update the targets' hour angle for the selection ordering.
-        for target in session.query(Targets):
+        for target in session.query(Target):
             target.lst = times.lst_start
         session.commit()
 
@@ -940,7 +933,6 @@ def cmd_make_queue(args) -> int:
             sched = ALGORITHMS[sal]
 
             obs_targets = sched.process(
-                best_slot_len(args.pid),
                 obsStart=obs_start,
                 obsEnd=obs_end,
                 query=nquery,
@@ -1033,7 +1025,7 @@ def cmd_process_queue(args) -> int:
             _idle = _idle if _idle > 0 else 0.0
             slewtime = 0.0
             target = (
-                session.query(Targets).filter(Targets.id == program.target_id).first()
+                session.query(Target).filter(Target.id == program.target_id).first()
             )
 
             target_pos = Position.from_ra_dec(target.target_ra, target.target_dec)
@@ -1051,7 +1043,7 @@ def cmd_process_queue(args) -> int:
             session.add(
                 ObservingLog(
                     time=datetime_from_jd(stime + 2400000.5).replace(tzinfo=None),
-                    tid=program.target_id,
+                    target_id=program.target_id,
                     name=program.name,
                     priority=program.priority,
                     action="Simulation: Acquisition Start",
@@ -1064,7 +1056,7 @@ def cmd_process_queue(args) -> int:
                     time=datetime_from_jd(stime + aplen / 86.4e3 + 2400000.5).replace(
                         tzinfo=None
                     ),
-                    tid=program.target_id,
+                    target_id=program.target_id,
                     name=program.name,
                     priority=program.priority,
                     action="Simulation: Acquisition End",
@@ -1093,7 +1085,7 @@ def cmd_process_queue(args) -> int:
         for program in session.query(Program).filter(Program.finished == True):  # noqa: E712
             program.finished = False
 
-        allpid = [p.pid for p in session.query(Projects)]
+        allpid = [p.pid for p in session.query(Project)]
 
         session.commit()
         for sched in ALGORITHMS.values():

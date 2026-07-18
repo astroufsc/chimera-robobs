@@ -10,8 +10,8 @@ night start twilight.
 import logging
 
 from chimera_robobs.scheduling.algorithms.base import (
-    BaseScheduleAlgorith,
-    TimedException,
+    BaseScheduleAlgorithm,
+    TimedError,
     get_session,
 )
 from chimera_robobs.scheduling.algorithms.higher import Higher
@@ -20,7 +20,7 @@ from chimera_robobs.scheduling.model import TimedDB
 log = logging.getLogger(__name__)
 
 
-class Timed(BaseScheduleAlgorith):
+class Timed(BaseScheduleAlgorithm):
     @staticmethod
     def name() -> str:
         return "TIMED"
@@ -34,7 +34,7 @@ class Timed(BaseScheduleAlgorith):
         # Try to read times from the configuration. If none is provided,
         # raise an exception.
         if "config" not in kwargs:
-            raise TimedException("No configuration file provided.")
+            raise TimedError("No configuration file provided.")
 
         config = kwargs["config"]
 
@@ -98,7 +98,7 @@ class Timed(BaseScheduleAlgorith):
             program.slew_at = timed_observation.execute_at
 
             obsblock = session.merge(program_list[2])
-            timed_observation.tid = program.target_id
+            timed_observation.target_id = program.target_id
             timed_observation.block_id = obsblock.id
 
             return program_list
@@ -122,7 +122,7 @@ class Timed(BaseScheduleAlgorith):
                 .filter(
                     TimedDB.pid == prog.pid,
                     TimedDB.block_id == block.id,
-                    TimedDB.tid == prog.target_id,
+                    TimedDB.target_id == prog.target_id,
                     TimedDB.finished == False,  # noqa: E712
                 )
                 .order_by(TimedDB.execute_at)

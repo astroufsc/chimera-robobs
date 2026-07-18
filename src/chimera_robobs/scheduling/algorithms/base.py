@@ -38,15 +38,15 @@ def get_session() -> Session:
     return _session_factory()
 
 
-class ExtintionMonitorException(ChimeraException):
+class ExtinctionMonitorError(ChimeraException):
     pass
 
 
-class TimedException(ChimeraException):
+class TimedError(ChimeraException):
     pass
 
 
-class RecurrentAlgorithException(ChimeraException):
+class RecurrentError(ChimeraException):
     pass
 
 
@@ -58,12 +58,12 @@ def airmass(alt: float) -> float:
     return am
 
 
-class BaseScheduleAlgorith:
+class BaseScheduleAlgorithm:
     """Static-method contract shared by all scheduling algorithms.
 
     The ids returned by :meth:`id` are stored in the database
     (``blockpar.sched_algorithm``) and must not change:
-    0 Higher/HIG, 1 ExtintionMonitor/STD, 2 Timed/TIMED, 3 Recurrent/RECURRENT,
+    0 Higher/HIG, 1 ExtinctionMonitor/STD, 2 Timed/TIMED, 3 Recurrent/RECURRENT,
     4 TimeSequence/TIMESEQUENCE.
     """
 
@@ -81,10 +81,6 @@ class BaseScheduleAlgorith:
     @staticmethod
     def process(*args, **kwargs):
         """Build the observing queue (slots) for this algorithm."""
-
-    @staticmethod
-    def merit_figure(target):
-        pass
 
     @staticmethod
     def next(time, programs):
@@ -105,10 +101,6 @@ class BaseScheduleAlgorith:
     @staticmethod
     def soft_clean(pid, block=None):
         """Soft clean: erase only information about past observations."""
-
-    @staticmethod
-    def model():
-        pass
 
     @staticmethod
     def timed_constraint() -> bool:

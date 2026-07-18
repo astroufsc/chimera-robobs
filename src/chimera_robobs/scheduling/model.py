@@ -45,14 +45,18 @@ from sqlalchemy import (
     Text,
     create_engine,
 )
-from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.ext.hybrid import hybrid_property
-from sqlalchemy.orm import backref, relation, sessionmaker
+from sqlalchemy.orm import backref, declarative_base, relationship, sessionmaker
 
 #: default location of the robobs scheduling database
 DEFAULT_ROBOBS_DATABASE = os.path.join(SYSTEM_CONFIG_DIRECTORY, "robobs.db")
 
 Base = declarative_base()
+
+
+def _utcnow() -> dt.datetime:
+    """Naive UTC timestamp for column defaults (the schema stores naive UTC)."""
+    return dt.datetime.now(dt.UTC).replace(tzinfo=None)
 
 
 def open_database(path: str | None = None, echo: bool = False) -> sessionmaker:
@@ -87,24 +91,16 @@ class ExtMoniDB(Base):
     nairmass = Column(Integer, default=1)
 
     pid = Column(String)  # project code
-    tid = Column(Integer, ForeignKey("targets.id"))
+    target_id = Column(Integer, ForeignKey("targets.id"))
 
-    observed_am = relation(
+    observed_am = relationship(
         "ObservedAM",
         backref=backref("extmonidb", order_by="ObservedAM.id"),
         cascade="all, delete, delete-orphan",
     )
 
-    def __init__(self, pid=None, tid=None, nairmass=1):
-        Base.__init__(self)
-        self.pid = pid
-        self.tid = tid
-        self.nairmass = nairmass
-
     def __str__(self):
-        return (
-            f"extmonidb[{self.pid}:{self.tid}]: {len(self.observed_am)}/{self.nairmass}"
-        )
+        return f"extmonidb[{self.pid}:{self.target_id}]: {len(self.observed_am)}/{self.nairmass}"
 
 
 class ObservedAM(Base):
@@ -116,11 +112,6 @@ class ObservedAM(Base):
     airmass = Column(Float, default=1.0)
     altitude = Column(Float, default=90.0)
 
-    def __init__(self, airmass=1.0, altitude=90.0):
-        Base.__init__(self)
-        self.airmass = airmass
-        self.altitude = altitude
-
 
 class TimedDB(Base):
     """Bookkeeping for the timed scheduling algorithm."""
@@ -131,19 +122,12 @@ class TimedDB(Base):
 
     pid = Column(String)  # project code
     block_id = Column(Integer, ForeignKey("obsblock.id"))
-    tid = Column(Integer, ForeignKey("targets.id"))
+    target_id = Column(Integer, ForeignKey("targets.id"))
 
     execute_at = Column(Float, default=0.0)
     observed_at = Column(Float, default=0.0)
     finished = Column(Boolean, default=False)
     scheduled = Column(Boolean, default=False)
-
-    def __init__(self, pid=None, execute_at=None):
-        Base.__init__(self)
-        if pid is not None:
-            self.pid = pid
-        if execute_at is not None:
-            self.execute_at = execute_at
 
     def __str__(self):
         status = (
@@ -157,13 +141,13 @@ class TimedDB(Base):
 class RecurrentDB(Base):
     """Bookkeeping for the recurrent scheduling algorithm."""
 
-    __tablename__ = "recurrent"
+    __tablename__ = "recurrentdb"
 
     id = Column(Integer, primary_key=True)
 
     pid = Column(String)  # project code
     block_id = Column(Integer, ForeignKey("obsblock.id"))
-    tid = Column(Integer, ForeignKey("targets.id"))
+    target_id = Column(Integer, ForeignKey("targets.id"))
 
     visits = Column(Integer, default=0)
     max_visits = Column(Integer, default=0)  # 0 means unrestricted
@@ -173,7 +157,7 @@ class RecurrentDB(Base):
         return f"[Recurrent:{self.pid}] visits: {self.visits} lastVisit: {self.last_visit}]"
 
 
-class Targets(Base):
+class Target(Base):
     __tablename__ = "targets"
 
     id = Column(Integer, primary_key=True)
@@ -255,7 +239,7 @@ class ObsBlock(Base):
     last_observation = Column(DateTime, default=None)
     scheduled = Column(Boolean, default=False)
     length = Column(Float, default=0.0)  # block length in seconds
-    actions = relation(
+    actions = relationship(
         "Action",
         backref=backref("obsblock", order_by="Action.id"),
         cascade="all, delete, delete-orphan",
@@ -277,7 +261,7 @@ class ObsBlock(Base):
         )
 
 
-class Projects(Base):
+class Project(Base):
     __tablename__ = "projects"
 
     id = Column(Integer, primary_key=True)
@@ -305,7 +289,7 @@ class Program(Base):
 
     priority = Column(Integer, default=0)
 
-    created_at = Column(DateTime, default=dt.datetime.utcnow)
+    created_at = Column(DateTime, default=_utcnow)
     finished = Column(Boolean, default=False)
     slew_at = Column(Float, default=0.0)  # MJD
 
@@ -343,8 +327,8 @@ class ObservingLog(Base):
     __tablename__ = "observinglog"
 
     id = Column(Integer, primary_key=True)
-    time = Column(DateTime, default=dt.datetime.utcnow)
-    tid = Column(Integer, ForeignKey("targets.id"))
+    time = Column(DateTime, default=_utcnow)
+    target_id = Column(Integer, ForeignKey("targets.id"))
     name = Column(String)  # target name (plain copy, no FK)
     priority = Column(Integer, default=-1)
     action = Column(String)

@@ -12,7 +12,6 @@ and wakes the scheduler up again.
 import enum
 import logging
 import os
-import threading
 import time
 
 from chimera.controllers.scheduler import model as chimera_model
@@ -52,7 +51,6 @@ class RobObs(ChimeraObject):
         ChimeraObject.__init__(self)
         self.rob_state = RobState.OFF
         self._current_program = None
-        self._current_program_condition = threading.Condition()
         self._no_program_on_queue = False
         self._debuglog = None
         self.machine = None
@@ -150,29 +148,9 @@ class RobObs(ChimeraObject):
         machine_state = self.machine.state() if self.machine else None
         return f"robstate={self.rob_state.value} machine={machine_state}"
 
-    def reset_scheduler(self):
-        """Queue a bias frame on the chimera scheduler to reset it."""
-        csession = chimera_model.Session()
-
-        cprog = chimera_model.Program(name="RESET", pi="ROBOBS", priority=1)
-        clean_program = chimera_model.Expose()
-        clean_program.frames = 1
-        clean_program.exptime = 0
-        clean_program.image_type = "BIAS"
-        clean_program.shutter = "CLOSE"
-        clean_program.filename = "RESET-$DATE-$TIME"
-        cprog.actions.append(clean_program)
-
-        csession.add(cprog)
-        # legacy bug: the session was never committed
-        csession.commit()
-
     # ------------------------------------------------------------------
     # proxies
     # ------------------------------------------------------------------
-
-    def get_site(self) -> SiteAdapter:
-        return self._site
 
     def get_scheduler(self, index: int = 0):
         self.log.debug("%s", self._scheduler_list[index])
@@ -256,7 +234,7 @@ class RobObs(ChimeraObject):
                 time=datetime_from_jd(self._site.mjd() + 2400000.5).replace(
                     tzinfo=None
                 ),
-                tid=program.tid,
+                target_id=program.tid,
                 name=program.name,
                 priority=program.priority,
                 action="ROBOBS: Program Started",
@@ -280,7 +258,7 @@ class RobObs(ChimeraObject):
                     time=datetime_from_jd(self._site.mjd() + 2400000.5).replace(
                         tzinfo=None
                     ),
-                    tid=program.tid,
+                    target_id=program.tid,
                     name=program.name,
                     priority=program.priority,
                     action=f"ROBOBS: Program End with status {status}({message})",

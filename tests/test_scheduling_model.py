@@ -20,8 +20,8 @@ def session_factory(tmp_path):
 
 
 def _populate(session):
-    project = model.Projects(pid="P01", pi="PI", abstract="", url="", priority=1)
-    target = model.Targets(name="NGC0001", target_ra=10.0, target_dec=-20.0)
+    project = model.Project(pid="P01", pi="PI", abstract="", url="", priority=1)
+    target = model.Target(name="NGC0001", target_ra=10.0, target_dec=-20.0)
     session.add_all([project, target])
     session.commit()
 
@@ -66,7 +66,7 @@ def test_open_database_creates_file_and_schema(tmp_path):
     factory = model.open_database(str(path))
     assert os.path.exists(path)
     session = factory()
-    assert session.query(model.Targets).count() == 0
+    assert session.query(model.Target).count() == 0
 
 
 def test_default_database_constant():
@@ -81,10 +81,10 @@ def test_relationships_round_trip(session_factory):
     # fresh session: query everything back through the foreign keys
     session = session_factory()
     prog, bp, ob, tg = (
-        session.query(model.Program, model.BlockPar, model.ObsBlock, model.Targets)
+        session.query(model.Program, model.BlockPar, model.ObsBlock, model.Target)
         .join(model.BlockPar, model.Program.blockpar_id == model.BlockPar.id)
         .join(model.ObsBlock, model.Program.obsblock_id == model.ObsBlock.id)
-        .join(model.Targets, model.Program.target_id == model.Targets.id)
+        .join(model.Target, model.Program.target_id == model.Target.id)
         .one()
     )
     assert tg.name == "NGC0001"
@@ -98,14 +98,14 @@ def test_relationships_round_trip(session_factory):
     # polymorphic round trip
     assert ob.actions[0].action_type == "Point"
     assert ob.actions[2].action_type == "AutoFocus"
-    # __str__ of everything is exercised (legacy Projects.__str__ crashed)
+    # __str__ of everything is exercised (legacy Project.__str__ crashed)
     for obj in (prog, bp, ob, tg, project) + tuple(ob.actions):
         assert str(obj)
 
 
 def test_targets_lst_hybrid_property(session_factory):
     session = session_factory()
-    target = model.Targets(name="t", target_ra=10.0, target_dec=0.0)
+    target = model.Target(name="t", target_ra=10.0, target_dec=0.0)
     session.add(target)
     target.lst = 12.0
     assert target.target_ah == pytest.approx(2.0)

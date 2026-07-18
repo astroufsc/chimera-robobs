@@ -14,8 +14,8 @@ import numpy as np
 from chimera.util.position import Position
 
 from chimera_robobs.scheduling.algorithms.base import (
-    BaseScheduleAlgorith,
-    ExtintionMonitorException,
+    BaseScheduleAlgorithm,
+    ExtinctionMonitorError,
     get_session,
 )
 from chimera_robobs.scheduling.algorithms.base import (
@@ -27,7 +27,7 @@ from chimera_robobs.scheduling.model import ExtMoniDB, ObservedAM
 log = logging.getLogger(__name__)
 
 
-class ExtintionMonitor(BaseScheduleAlgorith):
+class ExtinctionMonitor(BaseScheduleAlgorithm):
     """Schedule standard stars over a range of airmasses."""
 
     @staticmethod
@@ -71,7 +71,7 @@ class ExtintionMonitor(BaseScheduleAlgorith):
                 session.query(ExtMoniDB)
                 .filter(
                     ExtMoniDB.pid == obsblock.pid,
-                    ExtMoniDB.tid == obsblock.target_id,
+                    ExtMoniDB.target_id == obsblock.target_id,
                 )
                 .first()
             )
@@ -80,7 +80,9 @@ class ExtintionMonitor(BaseScheduleAlgorith):
                 # already in the database, just update
                 ext_moni_block.nairmass += 1
             else:
-                ext_moni_block = ExtMoniDB(pid=obsblock.pid, tid=obsblock.target_id)
+                ext_moni_block = ExtMoniDB(
+                    pid=obsblock.pid, target_id=obsblock.target_id
+                )
                 session.add(ext_moni_block)
         finally:
             session.commit()
@@ -412,9 +414,9 @@ class ExtintionMonitor(BaseScheduleAlgorith):
 
     @staticmethod
     def next(time, programs):
-        log.debug("Selecting target with ExtintionMonitor algorithm.")
+        log.debug("Selecting target with ExtinctionMonitor algorithm.")
 
-        site = ExtintionMonitor.site
+        site = ExtinctionMonitor.site
         mjd = time
         lst = site.lst_in_rads(datetime_from_jd(time + 2400000.5))
 
@@ -430,7 +432,7 @@ class ExtintionMonitor(BaseScheduleAlgorith):
                     session.query(ExtMoniDB)
                     .filter(
                         ExtMoniDB.pid == program[0].pid,
-                        ExtMoniDB.tid == program[0].target_id,
+                        ExtMoniDB.target_id == program[0].target_id,
                     )
                     .first()
                 )
@@ -556,7 +558,7 @@ class ExtintionMonitor(BaseScheduleAlgorith):
     @staticmethod
     def observed(time, program, site=None, soft=False):
         if site is None:
-            site = ExtintionMonitor.site
+            site = ExtinctionMonitor.site
         lst = site.lst_in_rads(datetime_from_jd(time + 2400000.5))
 
         session = get_session()
@@ -567,11 +569,13 @@ class ExtintionMonitor(BaseScheduleAlgorith):
             target = session.merge(program[3])
             extmoni_info = (
                 session.query(ExtMoniDB)
-                .filter(ExtMoniDB.pid == prog.pid, ExtMoniDB.tid == prog.target_id)
+                .filter(
+                    ExtMoniDB.pid == prog.pid, ExtMoniDB.target_id == prog.target_id
+                )
                 .first()
             )
             if extmoni_info is None:
-                raise ExtintionMonitorException(
+                raise ExtinctionMonitorError(
                     f"Could not find program {prog.pid} in the database."
                 )
 

@@ -22,7 +22,7 @@ def session_factory(tmp_path):
 
 
 def _add_program(session, pid, priority, slew_at, ra=10.0, dec=0.0, max_airmass=2.5):
-    target = model.Targets(name=f"tgt-{pid}-{priority}", target_ra=ra, target_dec=dec)
+    target = model.Target(name=f"tgt-{pid}-{priority}", target_ra=ra, target_dec=dec)
     session.add(target)
     session.commit()
     blockpar = model.BlockPar(bid=priority, pid=pid)
@@ -92,10 +92,10 @@ def test_check_conditions_airmass(session_factory):
     engine, site = _engine(session_factory)  # target at zenith, airmass 1.0
 
     rows = (
-        session.query(model.Program, model.BlockPar, model.ObsBlock, model.Targets)
+        session.query(model.Program, model.BlockPar, model.ObsBlock, model.Target)
         .join(model.BlockPar, model.Program.blockpar_id == model.BlockPar.id)
         .join(model.ObsBlock, model.Program.obsblock_id == model.ObsBlock.id)
-        .join(model.Targets, model.Program.target_id == model.Targets.id)
+        .join(model.Target, model.Program.target_id == model.Target.id)
         .one()
     )
 
@@ -117,10 +117,10 @@ def test_check_conditions_moon_distance(session_factory):
     site._moon = (10.5, 5.0)  # ~9 degrees from the target (above horizon)
 
     rows = (
-        session.query(model.Program, model.BlockPar, model.ObsBlock, model.Targets)
+        session.query(model.Program, model.BlockPar, model.ObsBlock, model.Target)
         .join(model.BlockPar, model.Program.blockpar_id == model.BlockPar.id)
         .join(model.ObsBlock, model.Program.obsblock_id == model.ObsBlock.id)
-        .join(model.Targets, model.Program.target_id == model.Targets.id)
+        .join(model.Target, model.Program.target_id == model.Target.id)
         .one()
     )
 
@@ -140,10 +140,10 @@ def test_check_conditions_night_end(session_factory):
     site._night_length = 0.001  # night ends (almost) right away
 
     rows = (
-        session.query(model.Program, model.BlockPar, model.ObsBlock, model.Targets)
+        session.query(model.Program, model.BlockPar, model.ObsBlock, model.Target)
         .join(model.BlockPar, model.Program.blockpar_id == model.BlockPar.id)
         .join(model.ObsBlock, model.Program.obsblock_id == model.ObsBlock.id)
-        .join(model.Targets, model.Program.target_id == model.Targets.id)
+        .join(model.Target, model.Program.target_id == model.Target.id)
         .one()
     )
 
@@ -159,10 +159,10 @@ def test_check_conditions_seeing(session_factory):
     engine = RobObsEngine(session_factory, site, log=LOG, seeing=lambda: 5.0)
 
     rows = (
-        session.query(model.Program, model.BlockPar, model.ObsBlock, model.Targets)
+        session.query(model.Program, model.BlockPar, model.ObsBlock, model.Target)
         .join(model.BlockPar, model.Program.blockpar_id == model.BlockPar.id)
         .join(model.ObsBlock, model.Program.obsblock_id == model.ObsBlock.id)
-        .join(model.Targets, model.Program.target_id == model.Targets.id)
+        .join(model.Target, model.Program.target_id == model.Target.id)
         .one()
     )
     assert not engine.check_conditions(rows, 61000.0)  # max_seeing default is 2.0

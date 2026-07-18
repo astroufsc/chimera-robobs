@@ -91,7 +91,7 @@ def test_add_project_creates_and_updates(tmp_path, db):
     assert _run(db, "add-project", "-f", filename) == 0
 
     session = _session(db)
-    project = session.query(model.Projects).one()
+    project = session.query(model.Project).one()
     assert project.pid == "P01"
     assert project.priority == 1
 
@@ -112,8 +112,8 @@ def test_add_project_creates_and_updates(tmp_path, db):
     filename = _write(tmp_path, "project.yaml", PROJECT_YAML.format(priority=7))
     assert _run(db, "add-project", "-f", filename) == 0
     session = _session(db)
-    assert session.query(model.Projects).count() == 1
-    assert session.query(model.Projects).one().priority == 7
+    assert session.query(model.Project).count() == 1
+    assert session.query(model.Project).one().priority == 7
     assert session.query(model.BlockPar).count() == 1
 
 
@@ -122,7 +122,7 @@ def test_add_targets_from_csv(tmp_path, db):
     assert _run(db, "add-targets", "-f", filename) == 0
 
     session = _session(db)
-    targets = session.query(model.Targets).order_by(model.Targets.id).all()
+    targets = session.query(model.Target).order_by(model.Target.id).all()
     # the invalid row is skipped with a warning
     assert [t.name for t in targets] == ["NGC0001", "NGC0002"]
     assert targets[0].target_ra == pytest.approx(10.0)
@@ -150,7 +150,7 @@ def test_add_observing_block(tmp_path, db):
     session = _session(db)
     block = session.query(model.ObsBlock).one()
     blockpar = session.query(model.BlockPar).one()
-    target = session.query(model.Targets).filter(model.Targets.name == "NGC0001").one()
+    target = session.query(model.Target).filter(model.Target.name == "NGC0001").one()
 
     assert block.pid == "P01"
     assert block.blockid == 1
@@ -199,14 +199,14 @@ def test_clean_commands_backup_the_robobs_database(tmp_path, db):
 
     assert _run(db, "clean-targets") == 0
     session = _session(db)
-    assert session.query(model.Targets).count() == 0
+    assert session.query(model.Target).count() == 0
     # the backup must be a copy of the robobs database itself
     # (the legacy tool copied an unrelated database)
     assert glob.glob(db + ".*.bak")
 
     assert _run(db, "delete-project", "--pid", "P01") == 0
     session = _session(db)
-    assert session.query(model.Projects).count() == 0
+    assert session.query(model.Project).count() == 0
     assert session.query(model.BlockPar).count() == 0
 
 
@@ -262,7 +262,7 @@ def test_observing_log_show(tmp_path, db, capsys):
         session.add(
             model.ObservingLog(
                 time=dt.datetime(2026, 7, 6, hour, 0, 0),
-                tid=1,
+                target_id=1,
                 name="tgt",
                 priority=1,
                 action=action,
@@ -324,14 +324,14 @@ def test_select_blocks_lst_window(tmp_path, db):
     factory = model.open_database(db)
     session = factory()
 
-    project = model.Projects(pid="P01", priority=1)
+    project = model.Project(pid="P01", priority=1)
     session.add(project)
     blockpar = model.BlockPar(bid=1, pid="P01")
     session.add(blockpar)
     session.commit()
 
     for i, ra in enumerate((1.0, 10.0, 23.0)):
-        target = model.Targets(name=f"t{i}", target_ra=ra, target_dec=0.0)
+        target = model.Target(name=f"t{i}", target_ra=ra, target_dec=0.0)
         session.add(target)
         session.commit()
         session.add(

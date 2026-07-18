@@ -3,7 +3,7 @@
 
 """Recurrent scheduling algorithm (id 3, name RECURRENT).
 
-Targets are only scheduled if they were never observed or if they were
+Target are only scheduled if they were never observed or if they were
 observed more than a specified number of days in the past.
 """
 
@@ -13,8 +13,8 @@ import logging
 from sqlalchemy import and_, or_
 
 from chimera_robobs.scheduling.algorithms.base import (
-    BaseScheduleAlgorith,
-    RecurrentAlgorithException,
+    BaseScheduleAlgorithm,
+    RecurrentError,
     get_session,
 )
 from chimera_robobs.scheduling.algorithms.higher import Higher
@@ -24,7 +24,7 @@ from chimera_robobs.scheduling.model import ObsBlock, RecurrentDB
 log = logging.getLogger(__name__)
 
 
-class Recurrent(BaseScheduleAlgorith):
+class Recurrent(BaseScheduleAlgorithm):
     @staticmethod
     def name() -> str:
         return "RECURRENT"
@@ -38,7 +38,7 @@ class Recurrent(BaseScheduleAlgorith):
         # Try to read the recurrence time from the configuration. If none is
         # provided, raise an exception.
         if ("config" not in kwargs) or ("recurrence" not in kwargs["config"]):
-            raise RecurrentAlgorithException(
+            raise RecurrentError(
                 "No configuration file provided or no recurrence time defined."
             )
 
@@ -99,7 +99,7 @@ class Recurrent(BaseScheduleAlgorith):
                 .filter(
                     RecurrentDB.pid == obsblock.pid,
                     RecurrentDB.block_id == obsblock.id,
-                    RecurrentDB.tid == obsblock.target_id,
+                    RecurrentDB.target_id == obsblock.target_id,
                 )
                 .first()
             )
@@ -109,7 +109,7 @@ class Recurrent(BaseScheduleAlgorith):
                 recurrent_block = RecurrentDB()
                 recurrent_block.pid = obsblock.pid
                 recurrent_block.block_id = obsblock.id
-                recurrent_block.tid = obsblock.target_id
+                recurrent_block.target_id = obsblock.target_id
                 session.add(recurrent_block)
         finally:
             session.commit()
@@ -136,7 +136,7 @@ class Recurrent(BaseScheduleAlgorith):
                     .filter(
                         RecurrentDB.pid == obsblock.pid,
                         RecurrentDB.block_id == obsblock.id,
-                        RecurrentDB.tid == obsblock.target_id,
+                        RecurrentDB.target_id == obsblock.target_id,
                     )
                     .first()
                 )
@@ -146,7 +146,7 @@ class Recurrent(BaseScheduleAlgorith):
                     recurrent_block.pid = obsblock.pid
                     # legacy bug: a trailing comma stored a tuple here
                     recurrent_block.block_id = obsblock.id
-                    recurrent_block.tid = obsblock.target_id
+                    recurrent_block.target_id = obsblock.target_id
                     recurrent_block.visits = 1
                     recurrent_block.last_visit = obstime
                     session.add(recurrent_block)

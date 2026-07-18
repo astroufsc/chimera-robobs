@@ -10,7 +10,7 @@ import numpy as np
 from chimera.util.position import Position
 
 from chimera_robobs.scheduling.algorithms.base import (
-    BaseScheduleAlgorith,
+    BaseScheduleAlgorithm,
     get_session,
 )
 from chimera_robobs.scheduling.dates import datetime_from_jd
@@ -27,7 +27,7 @@ SLOT_DTYPE = [
 ]
 
 
-class Higher(BaseScheduleAlgorith):
+class Higher(BaseScheduleAlgorithm):
     @staticmethod
     def name() -> str:
         return "HIG"

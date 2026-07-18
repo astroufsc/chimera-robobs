@@ -171,3 +171,12 @@ Legacy key names (`maxairmass`, `minmoonBright`, `schedalgorith`,
 `imageType`, `objectName`, ...) are accepted and mapped to the new column
 names; string templates in block files may use both the legacy
 (`{targetRa}`) and the new (`{target_ra}`) field names.
+
+## 2.0.0.dev deep refactor (2026-07)
+
+The pre-release schema changed once more (still no production 2.0 database
+exists): `tid` columns renamed `target_id` (extmonidb/timeddb/recurrentdb/
+observinglog), the recurrent table renamed `recurrentdb`, model classes
+`Targets`/`Projects` renamed `Target`/`Project` (table names unchanged),
+`Expose` gained `compress_format`/`wait_dome` (used by every production
+block file).  See `docs/plans/deep-refactor.md`.

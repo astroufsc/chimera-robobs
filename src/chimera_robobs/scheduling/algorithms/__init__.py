@@ -8,24 +8,24 @@ and must not change.
 """
 
 from chimera_robobs.scheduling.algorithms.base import (
-    BaseScheduleAlgorith,
+    BaseScheduleAlgorithm,
     configure,
 )
-from chimera_robobs.scheduling.algorithms.extinctionmonitor import ExtintionMonitor
+from chimera_robobs.scheduling.algorithms.extinctionmonitor import ExtinctionMonitor
 from chimera_robobs.scheduling.algorithms.higher import Higher
 from chimera_robobs.scheduling.algorithms.recurrent import Recurrent
 from chimera_robobs.scheduling.algorithms.timed import Timed
 from chimera_robobs.scheduling.algorithms.timesequence import TimeSequence
 
 #: scheduling algorithms keyed by their database id
-ALGORITHMS: dict[int, type[BaseScheduleAlgorith]] = {
-    cls.id(): cls for cls in (Higher, ExtintionMonitor, Timed, Recurrent, TimeSequence)
+ALGORITHMS: dict[int, type[BaseScheduleAlgorithm]] = {
+    cls.id(): cls for cls in (Higher, ExtinctionMonitor, Timed, Recurrent, TimeSequence)
 }
 
 __all__ = [
     "ALGORITHMS",
-    "BaseScheduleAlgorith",
-    "ExtintionMonitor",
+    "BaseScheduleAlgorithm",
+    "ExtinctionMonitor",
     "Higher",
     "Recurrent",
     "Timed",

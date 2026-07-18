@@ -14,7 +14,7 @@ import numpy as np
 from chimera.util.position import Position
 
 from chimera_robobs.scheduling.algorithms.base import (
-    BaseScheduleAlgorith,
+    BaseScheduleAlgorithm,
     get_session,
 )
 from chimera_robobs.scheduling.algorithms.higher import SLOT_DTYPE, Higher
@@ -24,7 +24,7 @@ from chimera_robobs.scheduling.model import ObsBlock
 log = logging.getLogger(__name__)
 
 
-class TimeSequence(BaseScheduleAlgorith):
+class TimeSequence(BaseScheduleAlgorithm):
     @staticmethod
     def name() -> str:
         return "TIMESEQUENCE"

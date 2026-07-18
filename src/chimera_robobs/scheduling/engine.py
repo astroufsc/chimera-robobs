@@ -7,7 +7,7 @@ Holds the pure scheduling logic (reschedule / get_program / check_conditions)
 extracted from the legacy ``RobObs`` controller so it can be used both by the
 chimera controller and by the offline ``chimera-robobs process-queue``
 simulation.  A *program* here is the 4-tuple
-``(Program, BlockPar, ObsBlock, Targets)`` returned by the database query.
+``(Program, BlockPar, ObsBlock, Target)`` returned by the database query.
 """
 
 import logging
@@ -20,7 +20,7 @@ from sqlalchemy.orm import sessionmaker
 
 from chimera_robobs.scheduling.algorithms import ALGORITHMS
 from chimera_robobs.scheduling.dates import datetime_from_jd
-from chimera_robobs.scheduling.model import BlockPar, ObsBlock, Program, Targets
+from chimera_robobs.scheduling.model import BlockPar, ObsBlock, Program, Target
 
 module_log = logging.getLogger(__name__)
 
@@ -69,7 +69,7 @@ class RobObsEngine:
     def get_program(self, nowmjd: float, priority: int):
         """Return ``(program_tuple, length_seconds)`` for a priority queue.
 
-        ``program_tuple`` is ``(Program, BlockPar, ObsBlock, Targets)`` or
+        ``program_tuple`` is ``(Program, BlockPar, ObsBlock, Target)`` or
         ``None`` when nothing suitable is found.
         """
         session = self.session()
@@ -79,10 +79,10 @@ class RobObsEngine:
         )
 
         programs = (
-            session.query(Program, BlockPar, ObsBlock, Targets)
+            session.query(Program, BlockPar, ObsBlock, Target)
             .join(BlockPar, Program.blockpar_id == BlockPar.id)
             .join(ObsBlock, Program.obsblock_id == ObsBlock.id)
-            .join(Targets, Program.target_id == Targets.id)
+            .join(Target, Program.target_id == Target.id)
             .filter(Program.priority == priority, Program.finished == False)  # noqa: E712
             .order_by(Program.slew_at)
         )
@@ -225,20 +225,6 @@ class RobObsEngine:
                 )
                 program, plen, waittime = aprogram, aplen, awaittime
 
-            if awaittime < waittime:
-                self.log.debug(
-                    "Program with higher priority has a higher waittime (%.2f/%.2f)",
-                    awaittime,
-                    waittime,
-                )
-            if not self.check_conditions(
-                program, nowmjd + (awaittime + aplen) / 86400.0
-            ):
-                self.log.debug(
-                    "Program with higher priority cannot be observed afterwards (%.2f)",
-                    nowmjd + (awaittime + aplen) / 86400.0,
-                )
-
         if program is None:
             # if no project can be executed, return nothing.
             session.commit()
@@ -260,12 +246,11 @@ class RobObsEngine:
         program,
         time: float,
         program_length: float = 0.0,
-        external_checker=None,
     ) -> bool:
         """Check if a program can be executed given the restrictions imposed
         by airmass, moon distance/brightness, seeing, ...
 
-        :param program: ``(Program, BlockPar, ObsBlock, Targets)`` tuple.
+        :param program: ``(Program, BlockPar, ObsBlock, Target)`` tuple.
         :param time: MJD of the intended start of the observation.
         :param program_length: program duration in seconds.
         :return: True (program can be executed) | False (it cannot).
@@ -385,9 +370,6 @@ class RobObsEngine:
 
         # 5) check cloud cover / weather: not implemented (as in the legacy
         # code, which had placeholder pass-throughs for these sensors).
-
-        if external_checker is not None:
-            pass
 
         self.log.debug("Target OK!")
 

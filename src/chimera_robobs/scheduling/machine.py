@@ -13,7 +13,6 @@ class Machine(threading.Thread):
         threading.Thread.__init__(self)
 
         self.controller = controller
-        self.current_program = None
 
         self.__state = None
         self.__state_lock = threading.Lock()
