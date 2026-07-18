@@ -800,15 +800,13 @@ def cmd_plot_log(args) -> int:
     hourly moon-distance annotations along each track, configurable output
     file and a Simulation/Observed title.
     """
-    try:
-        import matplotlib
+    # imported lazily: matplotlib is slow to load and only this command
+    # needs it
+    import matplotlib
 
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-        from matplotlib.dates import DateFormatter
-    except ImportError:
-        _err("*plot-log needs matplotlib (install with: uv sync --extra plot)")
-        return 1
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.dates import DateFormatter
 
     session = _session_factory(args)()
     bus, site_proxy = _connect(args, args.site)

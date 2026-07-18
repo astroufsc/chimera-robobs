@@ -12,17 +12,14 @@ requires-python = ">=3.13"
 dependencies = [
     "astropy>=6.1.3",
     "chimera",
+    "matplotlib>=3.8",
     "numpy>=2.1",
     "pyyaml>=6.0.2",
     "sqlalchemy==1.4.*",
 ]
 
-[project.optional-dependencies]
-plot = ["matplotlib>=3.8"]
-
 [dependency-groups]
 dev = [
-    "matplotlib>=3.8",
     "pre-commit>=4.0",
     "pytest>=8.3",
     "ruff>=0.14",

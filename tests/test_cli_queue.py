@@ -178,7 +178,6 @@ def test_every_subcommand_has_help():
 def test_plot_log_simulation(populated, fake_connect, tmp_path):
     """plot-log resurrects the legacy altitude chart with the mysql-branch
     improvements (aborted dashed, moon annotations, -f output)."""
-    pytest.importorskip("matplotlib")
     db = populated
     assert _run(db, "make-queue", "--pid", "P01", *_window_args()) == 0
     assert _run(db, "process-queue", *_window_args()) == 0

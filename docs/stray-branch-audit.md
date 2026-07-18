@@ -139,4 +139,4 @@ Follow-up (implemented 2026-07-17):
 4. The **plotting feature** was resurrected as `chimera-robobs plot-log`
    with the mysql-branch improvements (aborted programs dashed, hourly
    moon-distance annotations, `-f` output file, robust start/end pairing,
-   Simulation/Observed title); matplotlib is an optional extra.
+   Simulation/Observed title); matplotlib is a core dependency.

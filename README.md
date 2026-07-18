@@ -61,7 +61,7 @@ chimera-robobs process-queue            # offline simulation of a night
 chimera-robobs observing-log [--start 2026/07/06-18:00:00]
 chimera-robobs clean-queue --pid PID
 chimera-robobs delete-project --pid PID
-chimera-robobs plot-log [-f obsplan.png] [--simulation]   # needs matplotlib
+chimera-robobs plot-log [-f obsplan.png] [--simulation]
 ```
 
 Controller control (needs a running chimera server):
