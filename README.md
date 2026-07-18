@@ -15,11 +15,18 @@ scheduler up again.
 
 This package was extracted from
 [chimera-supervisor](https://github.com/astroufsc/chimera-supervisor) 2.0 and
-ported from Python 2 / old chimera to Python 3.13 / chimera 0.2.  The port is
-mechanical-but-careful (see `docs/robobs-port-notes.md` for every deliberate
-change and fixed bug) and **needs on-sky validation before production use**.
+ported from Python 2 / old chimera to Python 3.13 / chimera 0.2 (see
+`docs/robobs-port-notes.md` for every deliberate change and fixed bug, and
+`docs/plans/deep-refactor.md` for the subsequent cleanup).  It **needs
+on-sky validation before production use**.
 
-## Controller
+## Installation
+
+```
+pip install -U git+https://github.com/astroufsc/chimera-robobs.git
+```
+
+## Configuration Example
 
 Add to your chimera configuration:
 
@@ -32,7 +39,7 @@ controllers:
     # database: ~/.chimera/robobs.db     (default)
 ```
 
-## CLI usage
+## Command line
 
 Offline (operate directly on the robobs database, default
 `~/.chimera/robobs.db`, override with `--database`):
@@ -56,13 +63,24 @@ chimera-robobs [--host H --port P --robobs /RobObs/0] start | stop | wake | moni
 
 The project YAML (`project:` + `observing_blocks:`), block YAML
 (`pre-actions`/`pos-actions`) and targets CSV formats are unchanged from the
-legacy tool; legacy key names (`maxairmass`, `imageType`, ...) are still
-accepted.
+legacy tool; legacy key names (`maxairmass`, `imageType`, `EPOC`, ...) are
+still accepted.  The legacy pid-config key `past_meridian_only` is parsed
+but **not implemented** (as in the port; a warning is printed).
 
 ## Development
 
 ```
 uv sync
+uv run pre-commit install --install-hooks
 uv run pytest -q
-uv run ruff check src
+uv run ruff check src tests
 ```
+
+## License
+
+GPL-2.0-or-later
+
+## Contact
+
+- chimera discussion list: https://groups.google.com/g/chimera-discuss
+- https://github.com/astroufsc/chimera-robobs

@@ -208,8 +208,7 @@ class RobObsEngine:
 
             if awaittime + aplen < waittime:
                 self.log.info(
-                    "Program with priority %i fits in this slot. "
-                    "Selecting it instead.",
+                    "Program with priority %i fits in this slot. Selecting it instead.",
                     p,
                 )
                 program, plen, waittime = aprogram, aplen, awaittime
@@ -236,8 +235,7 @@ class RobObsEngine:
                 program, nowmjd + (awaittime + aplen) / 86400.0
             ):
                 self.log.debug(
-                    "Program with higher priority cannot be observed afterwards "
-                    "(%.2f)",
+                    "Program with higher priority cannot be observed afterwards (%.2f)",
                     nowmjd + (awaittime + aplen) / 86400.0,
                 )
 
@@ -299,9 +297,7 @@ class RobObsEngine:
         if program_length > 0.0:
             end_jd = time + program_length / 86.4e3 + 2400000.5
             observation_end = datetime_from_jd(end_jd).replace(tzinfo=None)
-            night_end = self.site.sunrise_twilight_begin(date_time).replace(
-                tzinfo=None
-            )
+            night_end = self.site.sunrise_twilight_begin(date_time).replace(tzinfo=None)
             if observation_end > night_end:
                 self.log.warning(
                     "Block finish @ %s. Night end is @ %s!", observation_end, night_end

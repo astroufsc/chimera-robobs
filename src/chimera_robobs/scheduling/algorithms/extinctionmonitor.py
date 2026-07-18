@@ -329,7 +329,9 @@ class ExtintionMonitor(BaseScheduleAlgorith):
                         < moon_brightness
                         < s_target[1].max_moon_bright
                     ):
-                        log.warning("Cannot allocate target due to moon restrictions...")
+                        log.warning(
+                            "Cannot allocate target due to moon restrictions..."
+                        )
                         log.debug(
                             "Moon Conditions @ %s: Target@ %s | Moon@: %s | "
                             "AngSep: %.2f (min.: %.2f) | Moon Brightness: %.2f "
@@ -402,7 +404,9 @@ class ExtintionMonitor(BaseScheduleAlgorith):
             nblock += 1
 
         if nalloc < nstars:
-            log.warning("Could not find enough stars.. Found %i of %i...", nalloc, nstars)
+            log.warning(
+                "Could not find enough stars.. Found %i of %i...", nalloc, nstars
+            )
 
         return obs_slots
 

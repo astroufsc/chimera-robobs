@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
-# SPDX-FileCopyrightText: 2014-present chimera-supervisor authors
+# SPDX-FileCopyrightText: 2014-present chimera-robobs authors
 
 """Date/time helpers for the robobs scheduling code.
 

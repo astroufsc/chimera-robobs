@@ -43,5 +43,12 @@ chimera = { path = "../chimera" }
 testpaths = ["tests"]
 addopts = "--import-mode=importlib"
 
+[tool.ruff]
+line-length = 88
+target-version = "py313"
+
 [tool.ruff.lint]
 select = ["N", "I", "UP", "F", "E4", "E7", "E9"]
+
+[tool.ruff.lint.flake8-copyright]
+notice-rgx = "(?i)# SPDX-FileCopyrightText:\\s\\d{4}(-(\\d{4}|present))*"

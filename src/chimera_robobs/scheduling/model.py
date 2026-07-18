@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
-# SPDX-FileCopyrightText: 2014-present chimera-supervisor authors
+# SPDX-FileCopyrightText: 2014-present chimera-robobs authors
 
 """SQLAlchemy model for the robobs scheduling database.
 
@@ -103,8 +103,7 @@ class ExtMoniDB(Base):
 
     def __str__(self):
         return (
-            f"extmonidb[{self.pid}:{self.tid}]: "
-            f"{len(self.observed_am)}/{self.nairmass}"
+            f"extmonidb[{self.pid}:{self.tid}]: {len(self.observed_am)}/{self.nairmass}"
         )
 
 

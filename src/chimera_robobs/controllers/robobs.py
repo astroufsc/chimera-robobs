@@ -187,9 +187,7 @@ class RobObs(ChimeraObject):
         """Current seeing from the first configured seeing monitor."""
         try:
             locations = [
-                s.strip()
-                for s in str(self["seeingmonitors"]).split(",")
-                if s.strip()
+                s.strip() for s in str(self["seeingmonitors"]).split(",") if s.strip()
             ]
             return float(self.get_proxy(locations[0]).seeing())
         except Exception:
@@ -325,9 +323,7 @@ class RobObs(ChimeraObject):
             self._debuglog.debug("Current state is off. Won't respond.")
             return
 
-        self._debuglog.debug(
-            "Scheduler went from BUSY to OFF. Needs rescheduling..."
-        )
+        self._debuglog.debug("Scheduler went from BUSY to OFF. Needs rescheduling...")
 
         session = self._session()
         csession = chimera_model.Session()

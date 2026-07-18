@@ -4,3 +4,10 @@ __pycache__/
 .ruff_cache/
 *.egg-info/
 *.pyc
+.history/
+.coverage
+htmlcov/
+*.swp
+.DS_Store
+.vscode/
+.idea/

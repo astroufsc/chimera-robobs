@@ -19,8 +19,7 @@ from chimera_robobs.scheduling.algorithms.timesequence import TimeSequence
 
 #: scheduling algorithms keyed by their database id
 ALGORITHMS: dict[int, type[BaseScheduleAlgorith]] = {
-    cls.id(): cls
-    for cls in (Higher, ExtintionMonitor, Timed, Recurrent, TimeSequence)
+    cls.id(): cls for cls in (Higher, ExtintionMonitor, Timed, Recurrent, TimeSequence)
 }
 
 __all__ = [

@@ -134,7 +134,12 @@ def test_add_targets_from_csv(tmp_path, db):
 
 
 def test_add_observing_block(tmp_path, db):
-    _run(db, "add-project", "-f", _write(tmp_path, "p.yaml", PROJECT_YAML.format(priority=1)))
+    _run(
+        db,
+        "add-project",
+        "-f",
+        _write(tmp_path, "p.yaml", PROJECT_YAML.format(priority=1)),
+    )
     _run(db, "add-targets", "-f", _write(tmp_path, "t.csv", TARGETS_CSV))
 
     block_yaml = _write(tmp_path, "block.yaml", BLOCK_YAML)
@@ -184,7 +189,12 @@ def test_add_observing_block(tmp_path, db):
 
 
 def test_clean_commands_backup_the_robobs_database(tmp_path, db):
-    _run(db, "add-project", "-f", _write(tmp_path, "p.yaml", PROJECT_YAML.format(priority=1)))
+    _run(
+        db,
+        "add-project",
+        "-f",
+        _write(tmp_path, "p.yaml", PROJECT_YAML.format(priority=1)),
+    )
     _run(db, "add-targets", "-f", _write(tmp_path, "t.csv", TARGETS_CSV))
 
     assert _run(db, "clean-targets") == 0
@@ -201,7 +211,12 @@ def test_clean_commands_backup_the_robobs_database(tmp_path, db):
 
 
 def test_delete_and_clean_observing_blocks(tmp_path, db):
-    _run(db, "add-project", "-f", _write(tmp_path, "p.yaml", PROJECT_YAML.format(priority=1)))
+    _run(
+        db,
+        "add-project",
+        "-f",
+        _write(tmp_path, "p.yaml", PROJECT_YAML.format(priority=1)),
+    )
     _run(db, "add-targets", "-f", _write(tmp_path, "t.csv", TARGETS_CSV))
     block_yaml = _write(tmp_path, "block.yaml", BLOCK_YAML)
     blocks_txt = _write(tmp_path, "blocks.txt", f"P01 1 1 {block_yaml} 1\n")
@@ -221,7 +236,12 @@ def test_delete_and_clean_observing_blocks(tmp_path, db):
 
 
 def test_clean_queue(tmp_path, db):
-    _run(db, "add-project", "-f", _write(tmp_path, "p.yaml", PROJECT_YAML.format(priority=1)))
+    _run(
+        db,
+        "add-project",
+        "-f",
+        _write(tmp_path, "p.yaml", PROJECT_YAML.format(priority=1)),
+    )
     session = _session(db)
     session.add(model.Program(pid="P01", name="x", priority=1))
     session.add(model.ObsBlock(pid="P01", blockid=1, scheduled=True))
@@ -278,8 +298,12 @@ def test_parse_when_formats():
 def test_make_times_with_overrides():
     site = FakeSite(lst_rads=math.pi)  # LST = 12 h
     args = SimpleNamespace(
-        jd_start=None, jd_end=None, date_start=None, date_end=None,
-        lst_start=None, lst_end=None,
+        jd_start=None,
+        jd_end=None,
+        date_start=None,
+        date_end=None,
+        lst_start=None,
+        lst_end=None,
     )
     times = cli.make_times(args, site)
     assert times.obs_start == site.sunset_twilight_end()
@@ -312,7 +336,9 @@ def test_select_blocks_lst_window(tmp_path, db):
         session.commit()
         session.add(
             model.ObsBlock(
-                target_id=target.id, blockid=i + 1, pid="P01",
+                target_id=target.id,
+                blockid=i + 1,
+                pid="P01",
                 block_par_id=blockpar.id,
             )
         )

@@ -173,7 +173,9 @@ def upsert_project(session, config) -> Projects:
         project.priority = priority
     else:
         _out(f"-Adding {pid} to the database ...")
-        project = Projects(pid=pid, pi=pi, abstract=abstract, url=url, priority=priority)
+        project = Projects(
+            pid=pid, pi=pi, abstract=abstract, url=url, priority=priority
+        )
         session.add(project)
 
     _out("-Reading observing block information...")
@@ -327,8 +329,7 @@ def add_targets_from_table(session, targets_table) -> int:
             position = Position.from_ra_dec(str(ra), str(dec))
         except ValueError:
             _err(
-                f"*Object in line {i} has invalid coordinates ({ra},{dec}). "
-                "Skipping..."
+                f"*Object in line {i} has invalid coordinates ({ra},{dec}). Skipping..."
             )
             continue
 
@@ -453,7 +454,9 @@ def _apply_action_config(act, actconfig, ctx) -> None:
             setattr(act, attr, value)
         except Exception:
             _err(
-                "Could not set attribute {} = {} on action {}".format(attr, actconfig[key], actconfig.get("action"))
+                "Could not set attribute {} = {} on action {}".format(
+                    attr, actconfig[key], actconfig.get("action")
+                )
             )
 
 
@@ -669,10 +672,7 @@ def cmd_delete_observing_block(args) -> int:
         _out("-Done")
         return 0
 
-    _out(
-        f"-Deleting all {nblocks} observing blocks with PID={args.pid} "
-        "from database"
-    )
+    _out(f"-Deleting all {nblocks} observing blocks with PID={args.pid} from database")
 
     for block in query.all():
         for blk_action in block.actions:
@@ -821,9 +821,7 @@ def select_blocks(session, pid: str, lst_start: float, lst_end: float):
         )
     )
     if lst_start < lst_end:
-        query = query.filter(
-            Targets.target_ra > lst_start, Targets.target_ra < lst_end
-        )
+        query = query.filter(Targets.target_ra > lst_start, Targets.target_ra < lst_end)
     else:
         query = query.filter(
             or_(
@@ -840,9 +838,7 @@ def add_observation(session, block_rows, obstime_jd: float) -> None:
 
     for subblock in block_rows:
         obs_block, blockpar, target = subblock
-        project = (
-            session.query(Projects).filter(Projects.pid == obs_block.pid).first()
-        )
+        project = session.query(Projects).filter(Projects.pid == obs_block.pid).first()
         _out(f"\t @{obstime_jd - 2400000.5:.3f} - {target}")
         program = Program(
             target_id=obs_block.target_id,
@@ -906,9 +902,7 @@ def cmd_make_queue(args) -> int:
         _out(
             f"-Observation start @ {str(times.obs_start)[:19]} | LST = {lst_start:4.1f} h"
         )
-        _out(
-            f"-Observation end   @ {str(times.obs_end)[:19]} | LST = {lst_end:4.1f} h"
-        )
+        _out(f"-Observation end   @ {str(times.obs_end)[:19]} | LST = {lst_end:4.1f} h")
 
         obs_start = times.jd_start
         obs_end = times.jd_end
@@ -1038,7 +1032,9 @@ def cmd_process_queue(args) -> int:
 
             _idle = _idle if _idle > 0 else 0.0
             slewtime = 0.0
-            target = session.query(Targets).filter(Targets.id == program.target_id).first()
+            target = (
+                session.query(Targets).filter(Targets.id == program.target_id).first()
+            )
 
             target_pos = Position.from_ra_dec(target.target_ra, target.target_dec)
             if tel_pos:
