@@ -119,6 +119,7 @@ PID_CONFIG_KEYS = {
     "recurrence",
     "times",
     "past_meridian_only",
+    "expire_overdue",
 }
 
 #: legacy CSV column names -> Target columns.  The production pointing CSVs
@@ -1349,7 +1350,14 @@ def _connect(args, location: str):
     else:
         time.sleep(0.5)
     url = f"tcp://{args.host}:{args.port}{location}"
-    proxy = Proxy(url, bus)
+    # every CLI call here is short (ephemeris lookups, start/stop): bound
+    # them so a lost bus response fails loudly instead of hanging the CLI
+    # forever (which blocks the supervisor's run_script when scripted).
+    # older chimera cores don't take the timeout kwarg - fall back cleanly.
+    try:
+        proxy = Proxy(url, bus, timeout=60.0)
+    except TypeError:
+        proxy = Proxy(url, bus)
     proxy.resolve()
     return bus, proxy
 

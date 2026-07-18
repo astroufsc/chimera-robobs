@@ -128,6 +128,11 @@ class TimedDB(Base):
     observed_at = Column(Float, default=0.0)
     finished = Column(Boolean, default=False)
     scheduled = Column(Boolean, default=False)
+    # cadence to the previous occurrence (days; 0 = never expires).  With
+    # the ``expire_overdue`` scheduling option, an occurrence whose
+    # execute_at falls within min_gap of the previous occurrence's ACTUAL
+    # run time is expired — a late run absorbs the occurrences it ran into.
+    min_gap = Column(Float, default=0.0)
 
     def __str__(self):
         status = (

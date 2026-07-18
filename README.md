@@ -101,7 +101,10 @@ Block files use `pre_actions:` (before the slew to the target) and
 `object_name`, ...).  The `scheduling:` keys are `slot_len`, `n_stars`,
 `n_airmass`, `pool_size`, `recurrence`, `times`, `past_meridian_only`
 (restrict the Higher-family selection to targets that already crossed the
-meridian — pier-flip avoidance on German equatorial mounts); the same keys
+meridian — pier-flip avoidance on German equatorial mounts),
+`expire_overdue` (timed: an occurrence executed late absorbs the following
+occurrences whose slots fall within one cadence interval of the actual run
+— no back-to-back runs after a blockage); the same keys
 in a separate YAML passed as `make-queue --pid-config` override the stored
 section per key (per-night knobs, e.g. changing the focus `times`).
 Files with unknown keys are rejected whole (never half-loaded).

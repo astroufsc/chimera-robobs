@@ -200,3 +200,13 @@ argument): the project file now carries an optional `scheduling:` section
 (same keys) stored with the project (`projects.scheduling`, JSON) and used
 as the make-queue default; `--pid-config` remains as a per-key, per-night
 override.
+
+## Timed `expire_overdue` option (2026-07)
+
+`timeddb` gained `min_gap` (cadence to the previous occurrence, days) and
+`observed_at` is now written on execution.  With `expire_overdue: true` in
+the scheduling section, an occurrence whose `execute_at` falls within
+`min_gap` of the previous occurrence's actual run time is expired
+(`finished` with `observed_at` 0) — a run delayed by a long block no
+longer produces back-to-back timed runs, and longer backlogs
+self-collapse to a single run.

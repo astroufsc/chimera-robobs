@@ -46,15 +46,26 @@ class Timed(Higher):
             slot_len=slot_len,
         )
 
-        # Store the desired times in the database
+        # Store the desired times in the database.  With ``expire_overdue``
+        # each occurrence carries its cadence to the previous one, so a run
+        # delayed into a later occurrence's window absorbs it (see next()).
+        expire_overdue = bool(config.get("expire_overdue", False))
         session = self.session()
         try:
-            for execute_at in execute_at_mjds:
+            previous = None
+            for execute_at in sorted(execute_at_mjds):
                 if execute_at > obs_end:
                     log.warning("Request for observation after the end of the night.")
 
+                min_gap = 0.0
+                if expire_overdue and previous is not None:
+                    min_gap = execute_at - previous
+                previous = execute_at
+
                 log.info("Requesting observation @ %.3f", execute_at)
-                session.add(TimedDB(pid=config["pid"], execute_at=execute_at))
+                session.add(
+                    TimedDB(pid=config["pid"], execute_at=execute_at, min_gap=min_gap)
+                )
             return programs
         finally:
             session.commit()
@@ -64,12 +75,48 @@ class Timed(Higher):
 
         try:
             pid = programs[0][0].pid
-            timed_observation = (
+            pending = (
                 session.query(TimedDB)
                 .filter(TimedDB.finished == False, TimedDB.pid == pid)  # noqa: E712
                 .order_by(TimedDB.execute_at)
+                .all()
+            )
+
+            # the last occurrence that actually ran (observed_at is only
+            # written on execution, never on expiry)
+            last_run = (
+                session.query(TimedDB)
+                .filter(
+                    TimedDB.finished == True,  # noqa: E712
+                    TimedDB.pid == pid,
+                    TimedDB.observed_at > 0,
+                )
+                .order_by(TimedDB.observed_at.desc())
                 .first()
             )
+            last_run_at = last_run.observed_at if last_run is not None else None
+
+            timed_observation = None
+            for request in pending:
+                if (
+                    request.min_gap
+                    and last_run_at is not None
+                    and request.execute_at < last_run_at + request.min_gap
+                ):
+                    # expire_overdue: the previous occurrence ran into this
+                    # one's window (it executed late) — skip it instead of
+                    # producing back-to-back runs
+                    log.info(
+                        "Timed request @ %.3f expired: previous run @ %.3f "
+                        "consumed its window (gap %.3f d).",
+                        request.execute_at,
+                        last_run_at,
+                        request.min_gap,
+                    )
+                    request.finished = True
+                    continue
+                timed_observation = request
+                break
 
             if timed_observation is None:
                 return None
@@ -142,6 +189,9 @@ class Timed(Higher):
 
             if timed_observation is not None:
                 timed_observation.finished = True
+                # actual run time: the expire_overdue window in next() is
+                # anchored on it
+                timed_observation.observed_at = time
         finally:
             session.commit()
 
@@ -157,6 +207,9 @@ class Timed(Higher):
 
             for timed in timed_observations:
                 timed.finished = False
+                # forget actual run times too, or a re-simulation would
+                # expire occurrences against the previous night's runs
+                timed.observed_at = 0.0
         finally:
             session.commit()
 

@@ -12,7 +12,7 @@ from chimera_robobs.scheduling import model
 from chimera_robobs.scheduling.algorithms import build_algorithms
 from chimera_robobs.scheduling.dates import MJD_JD_OFFSET, jd_from_datetime
 
-from .fakes import UT, RotatingSite
+from .fakes import UT, FakeSite, RotatingSite
 
 #: night start such that a target at RA 10 h is on the meridian at sunset
 NIGHT_START_LST_HOURS = 10.0
@@ -453,3 +453,142 @@ def test_timed_next_falls_back_when_candidate_fails_conditions(session_factory):
     session.commit()
     chosen, _ = engine.get_program(now, 1)
     assert chosen is None
+
+
+def _timed_setup(factory, site, times_hours, expire_overdue):
+    """One target/block plus TimedDB requests at now + times_hours."""
+    session = factory()
+    block = _add_block(session, ra_hours=10.0, blockid=1, sched_algorithm=2)
+    target = session.query(model.Target).one()
+    blockpar = session.query(model.BlockPar).one()
+    program = model.Program(
+        target_id=target.id,
+        name=target.name,
+        priority=1,
+        slew_at=site.mjd(),
+        pid="P01",
+        obsblock_id=block.id,
+        blockpar_id=blockpar.id,
+    )
+    session.add(program)
+
+    now = site.mjd()
+    previous = None
+    for hours in times_hours:
+        execute_at = now + hours / 24.0
+        min_gap = (
+            (execute_at - previous)
+            if (expire_overdue and previous is not None)
+            else 0.0
+        )
+        previous = execute_at
+        session.add(model.TimedDB(pid="P01", execute_at=execute_at, min_gap=min_gap))
+    session.commit()
+    return program, blockpar, block, target
+
+
+def test_timed_expire_overdue_absorbs_next_occurrence(session_factory):
+    """The attached-plot scenario: the 2 h occurrence executes late (pushed
+    by a long block) and would be followed 30 min later by the 4 h one;
+    with expire_overdue the late run absorbs it."""
+    site = FakeSite(latitude=0.0, lst_rads=10.0 * math.pi / 12.0)
+    factory = session_factory
+    row = _timed_setup(factory, site, [0.0, 2.0, 4.0, 6.0], expire_overdue=True)
+    algorithms = build_algorithms(factory, site)
+    timed = algorithms[2]
+    now = site.mjd()
+
+    # dusk occurrence runs on time
+    chosen = timed.next(now, [row])
+    assert chosen is not None
+    timed.observed(now, row, soft=True)
+
+    # the 2 h occurrence executes 1.5 h LATE (at +3.5 h)
+    late = now + 3.5 / 24.0
+    chosen = timed.next(late, [row])
+    assert chosen[0].slew_at == pytest.approx(now + 2.0 / 24.0)
+    timed.observed(late, row, soft=True)
+
+    # the 4 h occurrence (30 min after the late run) is absorbed: the next
+    # request offered is the 6 h one
+    chosen = timed.next(late + 0.01, [row])
+    assert chosen is not None
+    assert chosen[0].slew_at == pytest.approx(now + 6.0 / 24.0)
+
+    session = factory()
+    expired = (
+        session.query(model.TimedDB)
+        .filter(model.TimedDB.finished == True, model.TimedDB.observed_at == 0)  # noqa: E712
+        .all()
+    )
+    assert len(expired) == 1
+    assert expired[0].execute_at == pytest.approx(now + 4.0 / 24.0)
+
+
+def test_timed_expire_overdue_collapses_backlog(session_factory):
+    """A long blockage self-collapses: after a run at +5 h, the 4 h and 6 h
+    occurrences are absorbed and the 8 h one survives."""
+    site = FakeSite(latitude=0.0, lst_rads=10.0 * math.pi / 12.0)
+    factory = session_factory
+    row = _timed_setup(factory, site, [2.0, 4.0, 6.0, 8.0], expire_overdue=True)
+    algorithms = build_algorithms(factory, site)
+    timed = algorithms[2]
+    now = site.mjd()
+
+    # scheduler blocked until +5 h; the 2 h occurrence finally runs there
+    chosen = timed.next(now + 5.0 / 24.0, [row])
+    assert chosen[0].slew_at == pytest.approx(now + 2.0 / 24.0)
+    timed.observed(now + 5.0 / 24.0, row, soft=True)
+
+    # 4 h (< 5+2) and 6 h (< 7+... within the chain) are absorbed
+    chosen = timed.next(now + 5.1 / 24.0, [row])
+    assert chosen is not None
+    assert chosen[0].slew_at == pytest.approx(now + 8.0 / 24.0)
+
+
+def test_timed_without_expire_overdue_keeps_all_occurrences(session_factory):
+    """Option off (min_gap 0): the legacy behavior — every occurrence runs,
+    even back to back."""
+    site = FakeSite(latitude=0.0, lst_rads=10.0 * math.pi / 12.0)
+    factory = session_factory
+    row = _timed_setup(factory, site, [2.0, 4.0], expire_overdue=False)
+    algorithms = build_algorithms(factory, site)
+    timed = algorithms[2]
+    now = site.mjd()
+
+    chosen = timed.next(now + 3.5 / 24.0, [row])
+    assert chosen[0].slew_at == pytest.approx(now + 2.0 / 24.0)
+    timed.observed(now + 3.5 / 24.0, row, soft=True)
+
+    chosen = timed.next(now + 3.6 / 24.0, [row])
+    assert chosen is not None
+    assert chosen[0].slew_at == pytest.approx(now + 4.0 / 24.0)
+
+
+def test_timed_process_stores_min_gap(session_factory, site):
+    factory = session_factory
+    session = factory()
+    _add_block(session, ra_hours=10.0, blockid=1, sched_algorithm=2)
+
+    algorithms = build_algorithms(factory, site)
+    obs_start, obs_end = _window()
+    algorithms[2].process(
+        obs_start=obs_start,
+        obs_end=obs_end,
+        query=_query(session),
+        config={
+            "times": [0, 2, 6],
+            "pid": "P01",
+            "slot_len": 3600.0,
+            "expire_overdue": True,
+        },
+    )
+
+    session = factory()
+    gaps = [
+        t.min_gap
+        for t in session.query(model.TimedDB).order_by(model.TimedDB.execute_at)
+    ]
+    assert gaps[0] == pytest.approx(0.0)  # first occurrence never expires
+    assert gaps[1] == pytest.approx(2.0 / 24.0)
+    assert gaps[2] == pytest.approx(4.0 / 24.0)
