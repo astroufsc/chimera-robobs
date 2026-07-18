@@ -25,8 +25,8 @@ observing_blocks:
   block1:
     id: 1
     pid: P01
-    maxairmass: 5.0
-    schedalgorith: 0
+    max_airmass: 5.0
+    scheduling_algorithm: higher
 """
 
 TARGETS_CSV = """\
@@ -36,13 +36,13 @@ RA,DEC,NAME
 """
 
 BLOCK_YAML = """\
-pos-actions:
+post_actions:
   - action: expose
     filter: R
     frames: 1
     exptime: 30
-    imageType: OBJECT
-    objectName: "{name}"
+    image_type: OBJECT
+    object_name: "{name}"
     filename: "{pid}-{name}"
 """
 
@@ -164,7 +164,6 @@ def test_every_subcommand_has_help():
         "clean-queue",
         "process-queue",
         "observing-log",
-        "migrate-config",
         "start",
         "stop",
         "wake",

@@ -188,6 +188,7 @@ chimera-supervisor 2.0 configuration style: `scheduling_algorithm` takes a
 readable name (`higher`/`extinction_monitor`/`timed`/`recurrent`/
 `time_sequence`) instead of a numeric id, block files use
 `pre_actions`/`post_actions`, pid-config uses `slot_len`/`n_stars`/
-`n_airmass`.  The legacy dialect is still accepted everywhere and
-`chimera-robobs migrate-config` converts legacy files to the canonical
-form.
+`n_airmass`.  The legacy dialect is **not** accepted by the CLI (files
+with unknown keys are rejected whole); the standalone
+`scripts/migrate_legacy_config.py` converts legacy files once.  The
+`EPOC` CSV header remains accepted.

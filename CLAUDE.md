@@ -12,7 +12,9 @@ cookiecutter and the chimera-supervisor 2.0 house style.
 - Keep the project structure compatible with the chimera-template so
   template updates can be applied.
 - The algorithm ids/names stored in `blockpar.sched_algorithm` (0 HIG,
-  1 STD, 2 TIMED, 3 RECURRENT, 4 TIMESEQUENCE) and the legacy input-file
-  formats (project YAML, targets CSV, block `.list` + block YAML,
-  pid-config YAML) are compatibility surfaces — never change them.
+  1 STD, 2 TIMED, 3 RECURRENT, 4 TIMESEQUENCE) and the canonical
+  snake_case input dialect (`scheduling_algorithm: recurrent`,
+  `pre_actions`/`post_actions`, `slot_len`) are compatibility surfaces —
+  never change them.  Legacy-dialect files are converted once with
+  `scripts/migrate_legacy_config.py` (kept self-contained on purpose).
   See `docs/robobs-port-notes.md` and `docs/plans/deep-refactor.md`.

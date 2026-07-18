@@ -100,7 +100,7 @@ def test_higher_allocates_highest_and_removes_selected(
         obs_start=obs_start,
         obs_end=obs_end,
         query=_query(session),
-        config={"slotLen": 3600.0},
+        config={"slot_len": 3600.0},
     )
 
     # first slot: RA 10 h is at the zenith; second slot: it was removed from
@@ -119,7 +119,7 @@ def test_timesequence_keeps_selected_target(session_factory, algorithms, site):
         obs_start=obs_start,
         obs_end=obs_end,
         query=_query(session),
-        config={"slotLen": 3600.0},
+        config={"slot_len": 3600.0},
     )
 
     # the same (higher) target is selected in every slot: a time sequence
@@ -137,7 +137,7 @@ def test_higher_max_sched_blocks(session_factory, algorithms, site):
         obs_start=obs_start,
         obs_end=obs_end,
         query=_query(session),
-        config={"slotLen": 3600.0, "max_sched_blocks": 1},
+        config={"slot_len": 3600.0, "max_sched_blocks": 1},
     )
     assert list(slots["blockid"]).count(1) + list(slots["blockid"]).count(2) == 1
 
@@ -156,7 +156,7 @@ def test_higher_moon_distance_veto(session_factory, site):
         obs_start=obs_start,
         obs_end=obs_end,
         query=_query(session),
-        config={"slotLen": 3600.0},
+        config={"slot_len": 3600.0},
     )
     assert set(slots["blockid"]) == {-1}
 
@@ -173,7 +173,7 @@ def test_higher_airmass_veto(session_factory, site):
         obs_start=obs_start,
         obs_end=obs_end,
         query=_query(session),
-        config={"slotLen": 3600.0},
+        config={"slot_len": 3600.0},
     )
     assert set(slots["blockid"]) == {-1}
 
@@ -195,7 +195,7 @@ def test_recurrent_process_filters_by_recurrence(session_factory, site):
         obs_start=obs_start,
         obs_end=obs_end,
         query=_query(session),
-        config={"recurrence": 7, "pid": "P01", "slotLen": 3600.0},
+        config={"recurrence": 7, "pid": "P01", "slot_len": 3600.0},
         today=UT,
     )
 
@@ -222,7 +222,7 @@ def test_timed_process_stores_execute_times(session_factory, site):
         obs_start=obs_start,
         obs_end=obs_end,
         query=_query(session),
-        config={"times": [1.0], "pid": "P01", "slotLen": 3600.0},
+        config={"times": [1.0], "pid": "P01", "slot_len": 3600.0},
     )
 
     session = factory()
@@ -277,7 +277,7 @@ def test_extinction_monitor_process_allocates_airmass_ladder(session_factory, si
         obs_start=jd_start,
         obs_end=jd_start + 6.0 / 24.0,
         query=_query(session),
-        config={"nstars": 1, "nairmass": 2, "slotLen": 300.0},
+        config={"n_stars": 1, "n_airmass": 2, "slot_len": 300.0},
     )
 
     assert len(slots) == 2  # one star at two different airmasses

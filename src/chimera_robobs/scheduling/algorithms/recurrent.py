@@ -13,7 +13,7 @@ import logging
 
 from sqlalchemy import and_, or_
 
-from chimera_robobs.scheduling.algorithms.base import RecurrentError, normalize_config
+from chimera_robobs.scheduling.algorithms.base import RecurrentError
 from chimera_robobs.scheduling.algorithms.higher import Higher
 from chimera_robobs.scheduling.dates import datetime_from_mjd
 from chimera_robobs.scheduling.model import ObsBlock, RecurrentDB
@@ -32,8 +32,7 @@ class Recurrent(Higher):
     ):
         # Try to read the recurrence time from the configuration. If none is
         # provided, raise an exception.
-        config = normalize_config(config)
-        if "recurrence" not in config:
+        if not config or "recurrence" not in config:
             raise RecurrentError(
                 "No configuration file provided or no recurrence time defined."
             )

@@ -53,7 +53,6 @@ chimera-robobs process-queue            # offline simulation of a night
 chimera-robobs observing-log [--start 2026/07/06-18:00:00]
 chimera-robobs clean-queue --pid PID
 chimera-robobs delete-project --pid PID
-chimera-robobs migrate-config legacy.yaml [-o outdir]
 ```
 
 Controller control (needs a running chimera server):
@@ -87,13 +86,20 @@ observing_blocks:
 Block files use `pre_actions:` (before the slew to the target) and
 `post_actions:` (after it) with snake_case action keys (`image_type`,
 `object_name`, ...); pid-config files use `slot_len`, `n_stars`,
-`n_airmass`, `pool_size`, `recurrence`, `times`.
+`n_airmass`, `pool_size`, `recurrence`, `times`.  Files with unknown keys
+are rejected whole (never half-loaded).
 
-The legacy dialect (`schedalgorith: 3`, `maxairmass`, `imageType`,
-`pos-actions`, `slotLen`, `EPOC` CSV headers, ...) is still accepted
-everywhere, and `chimera-robobs migrate-config` converts legacy files to
-the canonical form.  The legacy pid-config key `past_meridian_only` is
-parsed but **not implemented** (as in the port; a warning is printed).
+Legacy-dialect files (`schedalgorith: 3`, `maxairmass`, `imageType`,
+`pos-actions`, `slotLen`, ...) are **not** accepted by the CLI; convert
+them once with the standalone script:
+
+```
+python scripts/migrate_legacy_config.py legacy.yaml [...] [-o outdir]
+```
+
+The legacy `EPOC` CSV header is still accepted (targets CSVs are numerous
+and harmless).  The legacy pid-config key `past_meridian_only` is parsed
+but **not implemented** (as in the port; a warning is printed).
 
 ## Development
 

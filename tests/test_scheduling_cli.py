@@ -25,15 +25,15 @@ observing_blocks:
   block1:
     id: 1
     pid: P01
-    maxairmass: 1.9
-    minairmass: 1.0
-    maxmoonBright: 99.0
-    minmoonBright: 0.0
-    minmoonDist: 25.0
-    maxseeing: 2.5
-    cloudcover: 1
-    schedalgorith: 0
-    applyextcorr: false
+    max_airmass: 1.9
+    min_airmass: 1.0
+    max_moon_bright: 99.0
+    min_moon_bright: 0.0
+    min_moon_distance: 25.0
+    max_seeing: 2.5
+    cloud_cover: 1
+    scheduling_algorithm: higher
+    apply_ext_corr: false
 """
 
 TARGETS_CSV = """\
@@ -44,22 +44,22 @@ not-a-coord,also-bad,BROKEN,OBJECT,0,2000,V
 """
 
 BLOCK_YAML = """\
-pre-actions:
+pre_actions:
   - action: expose
     frames: 1
     exptime: 0
-    imageType: BIAS
+    image_type: BIAS
     shutter: CLOSE
     filename: "bias-{name}"
 
-pos-actions:
+post_actions:
   - action: expose
     filter: R
     frames: 2
     exptime: 20.5
-    imageType: OBJECT
+    image_type: OBJECT
     shutter: OPEN
-    objectName: "{name}"
+    object_name: "{name}"
     filename: "{pid}-{name}"
   - action: point
     offset:
@@ -96,7 +96,6 @@ def test_add_project_creates_and_updates(tmp_path, db):
     assert project.priority == 1
 
     blockpar = session.query(model.BlockPar).one()
-    # legacy YAML keys must map onto the new column names
     assert blockpar.bid == 1
     assert blockpar.pid == "P01"
     assert blockpar.max_airmass == 1.9
@@ -163,7 +162,7 @@ def test_add_observing_block(tmp_path, db):
     bias, slew, science, offset_point = block.actions
 
     assert isinstance(bias, model.Expose)
-    assert bias.image_type == "BIAS"  # legacy imageType key
+    assert bias.image_type == "BIAS"
     assert bias.filename == "bias-NGC0001"  # {name} template
 
     assert isinstance(slew, model.Point)

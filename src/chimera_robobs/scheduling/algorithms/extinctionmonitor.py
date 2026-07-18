@@ -17,7 +17,6 @@ from chimera_robobs.scheduling.algorithms.base import (
     BaseScheduleAlgorithm,
     ExtinctionMonitorError,
     airmass,
-    normalize_config,
 )
 from chimera_robobs.scheduling.dates import datetime_from_jd, datetime_from_mjd
 from chimera_robobs.scheduling.model import ExtMoniDB, ObservedAM, block_duration
@@ -97,7 +96,7 @@ class ExtinctionMonitor(BaseScheduleAlgorithm):
         slot_len=None,
         overheads=None,
     ):
-        config = normalize_config(config)
+        config = config or {}
         slot_len = self._slot_len(config, slot_len)
         site = self.site
 
