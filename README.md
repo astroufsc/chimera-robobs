@@ -86,8 +86,10 @@ observing_blocks:
 Block files use `pre_actions:` (before the slew to the target) and
 `post_actions:` (after it) with snake_case action keys (`image_type`,
 `object_name`, ...); pid-config files use `slot_len`, `n_stars`,
-`n_airmass`, `pool_size`, `recurrence`, `times`.  Files with unknown keys
-are rejected whole (never half-loaded).
+`n_airmass`, `pool_size`, `recurrence`, `times`, `past_meridian_only`
+(restrict the Higher-family selection to targets that already crossed the
+meridian — pier-flip avoidance on German equatorial mounts).  Files with
+unknown keys are rejected whole (never half-loaded).
 
 Legacy-dialect files (`schedalgorith: 3`, `maxairmass`, `imageType`,
 `pos-actions`, `slotLen`, ...) are **not** accepted by the CLI; convert
@@ -98,8 +100,7 @@ python scripts/migrate_legacy_config.py legacy.yaml [...] [-o outdir]
 ```
 
 The legacy `EPOC` CSV header is still accepted (targets CSVs are numerous
-and harmless).  The legacy pid-config key `past_meridian_only` is parsed
-but **not implemented** (as in the port; a warning is printed).
+and harmless).
 
 ## Development
 

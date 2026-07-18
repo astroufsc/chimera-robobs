@@ -296,8 +296,8 @@ def test_unknown_pid_config_key_rejected(db, tmp_path, capsys):
     assert "migrate_legacy_config" in captured.err
 
 
-def test_past_meridian_only_warns_but_does_not_reject(db, tmp_path, capsys):
-    # recognized-but-unimplemented key: visibly ignored, file not rejected
+def test_past_meridian_only_is_a_supported_key(db, tmp_path, capsys):
+    # implemented since the stray-branch recovery: accepted without warnings
     config = tmp_path / "pid.yaml"
     config.write_text("pool_size: 16\npast_meridian_only: True\n")
 
@@ -318,4 +318,4 @@ def test_past_meridian_only_warns_but_does_not_reject(db, tmp_path, capsys):
         cli_module._connect = original
 
     captured = capsys.readouterr()
-    assert "past_meridian_only" in captured.err
+    assert "past_meridian_only" not in captured.err

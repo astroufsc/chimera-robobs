@@ -330,3 +330,63 @@ def test_extinction_monitor_next_skips_covered_levels(session_factory, site):
 
     # ...so the same altitude is not selected again
     assert extmoni.next(now_mjd, [(program, blockpar, block, target)]) is None
+
+
+def test_past_meridian_only_selects_setting_targets(session_factory, site):
+    """Recovered mysql-branch feature: with past_meridian_only the west
+    (setting) target is chosen even though the east one is higher."""
+    factory = session_factory
+    session = factory()
+    # at night start LST is 10 h: RA 9 h is 1 h past the meridian (setting),
+    # RA 10.2 h is still east of it (and higher in the sky)
+    _add_block(session, ra_hours=9.0, blockid=1)
+    _add_block(session, ra_hours=10.2, blockid=2)
+
+    algorithms = build_algorithms(factory, site)
+    obs_start = jd_from_datetime(UT)
+    obs_end = obs_start + 0.5 / 24.0  # single slot
+
+    slots = algorithms[0].process(
+        obs_start=obs_start,
+        obs_end=obs_end,
+        query=_query(session),
+        config={"slot_len": 1800.0, "past_meridian_only": True},
+    )
+    scheduled = [b for b in slots["blockid"] if b > 0]
+    assert scheduled and scheduled[0] == 1  # the setting target wins
+
+    # without the flag, the higher (east) target wins the first slot
+    slots = algorithms[0].process(
+        obs_start=obs_start,
+        obs_end=obs_end,
+        query=_query(session),
+        config={"slot_len": 1800.0},
+    )
+    scheduled = [b for b in slots["blockid"] if b > 0]
+    assert scheduled and scheduled[0] == 2
+
+
+def test_past_meridian_only_handles_ra_wrap(session_factory):
+    """The legacy ``lst > ra`` comparison misclassified targets near RA 0;
+    the hour-angle test must not."""
+    factory = session_factory
+    session = factory()
+    # LST 23.9 h: RA 23.5 h crossed the meridian 0.4 h ago (eligible);
+    # RA 0.1 h is 0.2 h EAST of the meridian (legacy lst>ra wrongly
+    # classified it as past meridian)
+    _add_block(session, ra_hours=23.5, blockid=1)
+    _add_block(session, ra_hours=0.1, blockid=2)
+
+    site = RotatingSite(latitude=0.0, lst_rads=23.9 * math.pi / 12.0, ut_now=UT)
+    algorithms = build_algorithms(factory, site)
+    obs_start = jd_from_datetime(UT)
+
+    slots = algorithms[0].process(
+        obs_start=obs_start,
+        obs_end=obs_start + 0.25 / 24.0,  # single slot
+        query=_query(session),
+        config={"slot_len": 1800.0, "past_meridian_only": True},
+    )
+    scheduled = [b for b in slots["blockid"] if b > 0]
+    # RA 0.1 h is higher in the sky but still east: RA 23.5 h must win
+    assert scheduled and scheduled[0] == 1

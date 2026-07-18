@@ -56,6 +56,12 @@ class Higher(BaseScheduleAlgorithm):
         slot_len = self._slot_len(config, slot_len)
         pool_size = int(config.get("pool_size", 1))
         max_sched_blocks = int(config.get("max_sched_blocks", -1))
+        # only consider targets that have already crossed the meridian
+        # (positive hour angle) — avoids pier flips on GEM mounts.  From the
+        # never-merged 2018 mysql branch; the legacy ``lst > ra`` comparison
+        # is replaced by a proper hour-angle test so RA/LST wrap-around near
+        # 0 h is handled.
+        past_meridian_only = bool(config.get("past_meridian_only", False))
         site = self.site
 
         # Create observation slots.
@@ -156,6 +162,7 @@ class Higher(BaseScheduleAlgorithm):
                     ("moon_distance", float),
                     ("min_moon_distance", float),
                     ("moon_bright_ok", bool),
+                    ("meridian_ok", bool),
                 ],
             )
 
@@ -166,6 +173,9 @@ class Higher(BaseScheduleAlgorithm):
                     time_offset = np.radians(moon_par["length"][index] / 3600.0)
                     ra_h = radec_array[index].ra.hour
                     dec_d = radec_array[index].dec.deg
+                    # hour angle folded to [0, 2pi): (0, pi) means the target
+                    # has crossed the meridian and is setting
+                    hour_angle = (lst - radec_array[index].ra.radian) % (2.0 * np.pi)
                     target_par[index] = (
                         site.ra_dec_to_alt_az(ra_h, dec_d, lst + time_offset / 2.0)[0],
                         site.ra_dec_to_alt_az(ra_h, dec_d, lst)[0],
@@ -178,6 +188,7 @@ class Higher(BaseScheduleAlgorithm):
                             <= moon_par["max_moon_bright"][index]
                         )
                         or (moon_alt < 0.0),
+                        (not past_meridian_only) or (0.0 < hour_angle < np.pi),
                     )
                 except Exception:
                     log.exception("error computing target parameters")
@@ -191,10 +202,10 @@ class Higher(BaseScheduleAlgorithm):
             pool.join()
             log.debug("Pool done")
 
-            # Create moon mask
+            # Create the eligibility mask (moon constraints + meridian side)
             moon_mask = np.bitwise_and(
                 target_par["moon_distance"] > target_par["min_moon_distance"],
-                target_par["moon_bright_ok"],
+                np.bitwise_and(target_par["moon_bright_ok"], target_par["meridian_ok"]),
             )
 
             mapping = np.arange(len(radec_array))[moon_mask]

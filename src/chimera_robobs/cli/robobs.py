@@ -116,10 +116,8 @@ PID_CONFIG_KEYS = {
     "n_airmass",
     "recurrence",
     "times",
+    "past_meridian_only",
 }
-
-#: recognized-but-unimplemented pid-config keys (warn instead of reject)
-PID_CONFIG_IGNORED_KEYS = {"past_meridian_only"}
 
 #: legacy CSV column names -> Target columns.  The production pointing CSVs
 #: spell the epoch column ``EPOC`` (no H); both spellings are accepted.
@@ -922,11 +920,7 @@ def cmd_make_queue(args) -> int:
             _err(str(exc))
             return 1
     pgrconfig.setdefault("pid", args.pid)
-    for key in sorted(set(pgrconfig) & PID_CONFIG_IGNORED_KEYS):
-        # e.g. the T80S/LNA past_meridian_only key, which was never
-        # implemented: parsed but visibly ignored
-        _err(f"*Ignoring unsupported pid-config key: {key}")
-    unknown = set(pgrconfig) - PID_CONFIG_KEYS - PID_CONFIG_IGNORED_KEYS
+    unknown = set(pgrconfig) - PID_CONFIG_KEYS
     if unknown:
         _err(f"*Unknown pid-config keys: {sorted(unknown)} ({MIGRATE_HINT})")
         return 1

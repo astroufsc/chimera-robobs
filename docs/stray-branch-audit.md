@@ -31,16 +31,9 @@ use `past_meridian_only`, which only ever existed there).
 | Inclusive moon-brightness bounds | `mysql` `3138e3b` | `min <= brightness <= max` instead of strict `<`; with the ubiquitous `min: 0 / max: 100` configs, an exactly-new-moon or full-moon brightness failed the check.  Applied in `engine.check_conditions` and both spots in `Higher.process`. |
 | Recurrent: NULL `last_observation` | `mysql` `b2925f7` | Blocks marked `observed` with no `last_observation` date (left by simulations) were excluded from Recurrent scheduling forever; a third OR clause keeps them eligible. |
 | Block length from stored `ObsBlock.length` | `bugfix/block_length` `d317c21`/`d567cd4` | The engine's program length (feeds the end-of-night and end-of-block checks) and the `process-queue` simulation now use the ingest-time stored length (which includes 12 s readout and 600 s focus overheads) instead of recomputing a bare exposure sum; falls back to the exposure sum when no length is stored. |
+| `past_meridian_only` | `mysql` `3138e3b` | pid-config flag restricting Higher-family selection to targets that already crossed the meridian (pier-flip avoidance on the Robo40 GEM; the LNA focus configs use it).  Re-implemented with a proper hour-angle test — the legacy `lst > ra` comparison misclassified targets near RA 0 h. |
 
 ## Lost robobs features — candidates, not applied
-
-* **`past_meridian_only`** (`mysql` `3138e3b`) — pid-config flag restricting
-  Higher-family selection to targets already past the meridian (pier-flip
-  avoidance on the Robo40 GEM; used by the LNA focus configs).  Trivial to
-  re-implement in the refactored `Higher.process` (one mask condition); the
-  legacy `lst > ra` comparison also needs a 24 h-wrap fix (hour angle test)
-  — it misclassified targets near RA 0.  The 2.0 CLI currently warns and
-  ignores the key.
 * **Park-then-STOP on empty queue** (`bugfix/observation_after_night_end`
   `ab7ecd3`) — after queuing the SAFETY park program, the branch *stopped*
   robobs entirely ("prevents observations after the night ends"); 2.0
