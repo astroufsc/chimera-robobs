@@ -773,8 +773,16 @@ def _pair_observing_log(session, entries, start_marker, end_marker) -> list[dict
                 current["end"] = entry.time
                 current["aborted"] = True
                 programs.append(current)
+            # project code for the color grouping (the log stores targets,
+            # not projects: resolve through the queue programs)
+            queue_program = (
+                session.query(Program)
+                .filter(Program.target_id == entry.target_id)
+                .first()
+            )
             current = {
                 "name": target.name,
+                "pid": queue_program.pid if queue_program is not None else None,
                 "ra": target.target_ra,
                 "dec": target.target_dec,
                 "start": entry.time,
@@ -857,6 +865,7 @@ def cmd_plot_log(args) -> int:
             moon_alts.append(altitude(moon_ra, moon_dec, when))
         ax.plot(moon_grid, moon_alts, "--", color="black", label="Moon")
 
+        # one color per PROJECT; tracks are labeled with their target name
         colors: dict[str, str] = {}
         for program in programs:
             minutes = int((program["end"] - program["start"]).total_seconds() // 60)
@@ -866,16 +875,20 @@ def cmd_plot_log(args) -> int:
             ]
             alts = [altitude(program["ra"], program["dec"], t) for t in grid]
 
-            label = None if program["name"] in colors else program["name"]
+            group = program["pid"] or program["name"]
+            label = None if group in colors else group
             style = "--" if program["aborted"] else "-"
-            (line,) = ax.plot(
-                grid, alts, style, color=colors.get(program["name"]), label=label
-            )
-            colors.setdefault(program["name"], line.get_color())
+            (line,) = ax.plot(grid, alts, style, color=colors.get(group), label=label)
+            colors.setdefault(group, line.get_color())
             if not program["aborted"]:
-                ax.fill_between(
-                    grid, alts, alt_min, facecolor=colors[program["name"]], alpha=0.5
-                )
+                ax.fill_between(grid, alts, alt_min, facecolor=colors[group], alpha=0.5)
+            ax.text(
+                grid[0],
+                alts[0] + 1.2,
+                program["name"],
+                fontsize=7,
+                color=colors[group],
+            )
 
             # hourly moon-distance annotations along the track
             target_pos = Position.from_ra_dec(program["ra"], program["dec"])
@@ -884,7 +897,7 @@ def cmd_plot_log(args) -> int:
                 separation = float(
                     target_pos.angsep(Position.from_ra_dec(moon_ra, moon_dec))
                 )
-                ax.text(t, alt, f"{separation:.0f}")
+                ax.text(t, alt, f"{separation:.0f}", fontsize=7)
 
         kind = "Simulation" if args.simulation else "Observed"
         ax.set_title(f"robobs {kind} — night of {obs_start.date()}")
