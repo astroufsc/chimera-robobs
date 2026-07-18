@@ -8,7 +8,6 @@ Also hosts the slot-allocation loop shared with :class:`TimeSequence`
 """
 
 import logging
-from multiprocessing.pool import ThreadPool
 
 import numpy as np
 from chimera.util.position import Position
@@ -54,7 +53,12 @@ class Higher(BaseScheduleAlgorithm):
     def process(self, *, obs_start, obs_end, query, config=None, slot_len=None):
         config = config or {}
         slot_len = self._slot_len(config, slot_len)
-        pool_size = int(config.get("pool_size", 1))
+        if "pool_size" in config:
+            # accepted for input compatibility, but ignored: chimera 0.2's
+            # bus client matches responses by source URL only, so concurrent
+            # proxy calls from a thread pool race each other's replies (and
+            # deadlock); the site calls run serially instead.
+            log.debug("pool_size is ignored (bus proxy calls are serialized)")
         max_sched_blocks = int(config.get("max_sched_blocks", -1))
         # only consider targets that have already crossed the meridian
         # (positive hour angle) — avoids pier flips on GEM mounts.  From the
@@ -193,14 +197,8 @@ class Higher(BaseScheduleAlgorithm):
                 except Exception:
                     log.exception("error computing target parameters")
 
-            pool = ThreadPool(pool_size)
             for i in range(len(radec_array)):
-                pool.apply_async(worker, (i,))
-
-            log.debug("Starting pool")
-            pool.close()
-            pool.join()
-            log.debug("Pool done")
+                worker(i)
 
             # Create the eligibility mask (moon constraints + meridian side)
             moon_mask = np.bitwise_and(
