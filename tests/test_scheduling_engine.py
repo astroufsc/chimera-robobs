@@ -247,3 +247,27 @@ def test_get_program_prefers_stored_block_length(session_factory):
     engine, site = _engine(session_factory)
     _, length = engine.get_program(site.mjd(), 1)
     assert length == pytest.approx(84.0)
+
+
+def test_check_conditions_rejects_daytime(session_factory):
+    """Night-window guard: the sun being up (next dusk before next dawn)
+    rejects regardless of airmass/moon — closes the daylight-execution gap
+    the 2018 ab7ecd3 branch worked around by stopping robobs."""
+    session = session_factory()
+    _add_program(session, "P01", 1, slew_at=61000.0)
+
+    rows = (
+        session.query(model.Program, model.BlockPar, model.ObsBlock, model.Target)
+        .join(model.BlockPar, model.Program.blockpar_id == model.BlockPar.id)
+        .join(model.ObsBlock, model.Program.obsblock_id == model.ObsBlock.id)
+        .join(model.Target, model.Program.target_id == model.Target.id)
+        .one()
+    )
+
+    day_site = FakeSite(latitude=0.0, lst_rads=10.0 * math.pi / 12.0, daytime=True)
+    engine = RobObsEngine(session_factory, day_site, log=LOG)
+    assert not engine.check_conditions(rows, 61000.0)
+
+    night_site = FakeSite(latitude=0.0, lst_rads=10.0 * math.pi / 12.0)
+    engine = RobObsEngine(session_factory, night_site, log=LOG)
+    assert engine.check_conditions(rows, 61000.0)

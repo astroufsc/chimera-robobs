@@ -36,8 +36,16 @@ controllers:
     name: robobs
     site: /Site/0
     schedulers: /Scheduler/0
-    # database: ~/.chimera/robobs.db     (default)
+    telescope: /Telescope/0        # tracking stopped after each program
+    # database: ~/.chimera/robobs.db       (default)
+    # clean_scheduler_on_start: true       (wipe stale scheduler queue)
 ```
+
+Safety behavior: programs are only considered while it is astronomically
+night (daytime evaluation is rejected outright), the telescope tracking is
+stopped after every finished program so the mount never tracks into a
+limit, and switching robobs on wipes stale programs left in the chimera
+scheduler queue by a previous run.
 
 ## Command line
 
@@ -53,6 +61,7 @@ chimera-robobs process-queue            # offline simulation of a night
 chimera-robobs observing-log [--start 2026/07/06-18:00:00]
 chimera-robobs clean-queue --pid PID
 chimera-robobs delete-project --pid PID
+chimera-robobs plot-log [-f obsplan.png] [--simulation]   # needs matplotlib
 ```
 
 Controller control (needs a running chimera server):

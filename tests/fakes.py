@@ -18,7 +18,14 @@ SIDEREAL_RATE = 1.0027379
 
 class FakeSite:
     """Implements the site interface consumed by the robobs engine and
-    algorithms (the ``SiteAdapter`` surface), with a fixed LST."""
+    algorithms (the ``SiteAdapter`` surface), with a fixed LST.
+
+    The twilight methods mimic the real Site's *next-event* semantics: by
+    default any queried date counts as night time (the next dawn is
+    ``night_length_hours`` ahead, the next dusk a day away); with
+    ``daytime=True`` the next dusk comes first, so the engine's night
+    guard rejects.
+    """
 
     def __init__(
         self,
@@ -28,6 +35,7 @@ class FakeSite:
         moon_ra_dec: tuple[float, float] = (12.0, 0.0),
         moon_phase: float = 0.2,
         night_length_hours: float = 12.0,
+        daytime: bool = False,
     ):
         self.latitude = latitude
         self._lst = lst_rads
@@ -35,6 +43,16 @@ class FakeSite:
         self._moon = moon_ra_dec
         self._moon_phase = moon_phase
         self._night_length = night_length_hours
+        self._daytime = daytime
+
+    def _parse(self, date) -> dt.datetime:
+        if date is None:
+            return self._ut
+        if isinstance(date, str):
+            return dt.datetime.strptime(date, "%Y/%m/%d %H:%M:%S").replace(
+                tzinfo=dt.UTC
+            )
+        return ensure_datetime(date)
 
     def ut(self) -> dt.datetime:
         return self._ut
@@ -49,10 +67,16 @@ class FakeSite:
         return self._lst
 
     def sunset_twilight_end(self, date=None) -> dt.datetime:
-        return self._ut
+        date = self._parse(date)
+        if self._daytime:
+            return date + dt.timedelta(hours=1)  # dusk before dawn: sun up
+        return date + dt.timedelta(hours=24)
 
     def sunrise_twilight_begin(self, date=None) -> dt.datetime:
-        return self._ut + dt.timedelta(hours=self._night_length)
+        date = self._parse(date)
+        if self._daytime:
+            return date + dt.timedelta(hours=13)
+        return date + dt.timedelta(hours=self._night_length)
 
     def ra_dec_to_alt_az(self, ra_hours, dec_deg, lst_in_rads) -> tuple[float, float]:
         return Position.ra_dec_to_alt_az(
@@ -73,15 +97,6 @@ class RotatingSite(FakeSite):
     rate; dates may be datetimes or pyephem-style strings (as sent by
     ``SiteAdapter`` over the fake proxy boundary).
     """
-
-    def _parse(self, date) -> dt.datetime:
-        if date is None:
-            return self._ut
-        if isinstance(date, str):
-            return dt.datetime.strptime(date, "%Y/%m/%d %H:%M:%S").replace(
-                tzinfo=dt.UTC
-            )
-        return ensure_datetime(date)
 
     def lst_in_rads(self, date=None) -> float:
         date = self._parse(date)
@@ -112,3 +127,19 @@ class FakeBus:
 
     def shutdown(self):
         self.shutdown_called = True
+
+
+class FakeTelescopeProxy:
+    """Records tracking calls made by the RobObs controller."""
+
+    def __init__(self, tracking: bool = True):
+        self.tracking = tracking
+        self.calls = []
+
+    def is_tracking(self) -> bool:
+        self.calls.append("is_tracking")
+        return self.tracking
+
+    def stop_tracking(self):
+        self.calls.append("stop_tracking")
+        self.tracking = False

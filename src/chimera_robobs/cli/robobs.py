@@ -15,6 +15,7 @@ Offline commands (operate directly on the robobs database):
     chimera-robobs delete-observing-block --pid PID
     chimera-robobs clean-queue --pid PID
     chimera-robobs observing-log [--start ...] [--end ...]
+    chimera-robobs plot-log [-f obsplan.png] [--simulation] [time options]
 
 Commands that talk to a running chimera server:
 
@@ -750,6 +751,160 @@ def cmd_observing_log(args) -> int:
 
 
 # ----------------------------------------------------------------------
+# observing-log plotting
+# ----------------------------------------------------------------------
+
+
+def _pair_observing_log(session, entries, start_marker, end_marker) -> list[dict]:
+    """Pair start/end observing-log entries into program intervals.
+
+    A start with no matching end (an aborted program) is closed at the next
+    program's start — or one minute after its own start when it is the last
+    entry — and flagged ``aborted`` so it can be drawn differently.
+    """
+    programs = []
+    current = None
+    for entry in entries:
+        if start_marker in entry.action:
+            target = session.query(Target).filter(Target.id == entry.target_id).first()
+            if target is None:
+                continue
+            if current is not None:  # previous program never ended: aborted
+                current["end"] = entry.time
+                current["aborted"] = True
+                programs.append(current)
+            current = {
+                "name": target.name,
+                "ra": target.target_ra,
+                "dec": target.target_dec,
+                "start": entry.time,
+                "end": None,
+                "aborted": False,
+            }
+        elif end_marker in entry.action and current is not None:
+            current["end"] = entry.time
+            programs.append(current)
+            current = None
+    if current is not None:
+        current["end"] = current["start"] + dt.timedelta(minutes=1)
+        current["aborted"] = True
+        programs.append(current)
+    return programs
+
+
+def cmd_plot_log(args) -> int:
+    """Plot the observing-log altitude chart of a night.
+
+    Resurrects the legacy ``makeObservingLog`` plot with the improvements
+    from the never-merged mysql branch: aborted programs drawn dashed,
+    hourly moon-distance annotations along each track, configurable output
+    file and a Simulation/Observed title.
+    """
+    try:
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        from matplotlib.dates import DateFormatter
+    except ImportError:
+        _err("*plot-log needs matplotlib (install with: uv sync --extra plot)")
+        return 1
+
+    session = _session_factory(args)()
+    bus, site_proxy = _connect(args, args.site)
+    try:
+        site = SiteAdapter(site_proxy)
+        times = make_times(args, site)
+        obs_start = times.obs_start.replace(tzinfo=None)
+        obs_end = times.obs_end.replace(tzinfo=None)
+        pad = dt.timedelta(hours=2)
+
+        if args.simulation:
+            start_marker = "Simulation: Acquisition Start"
+            end_marker = "Simulation: Acquisition End"
+        else:
+            start_marker = "Program Started"
+            end_marker = "Program End"
+
+        entries = (
+            session.query(ObservingLog)
+            .filter(
+                ObservingLog.time > obs_start - pad,
+                ObservingLog.time <= obs_end + pad,
+            )
+            .order_by(ObservingLog.time)
+            .all()
+        )
+        programs = _pair_observing_log(session, entries, start_marker, end_marker)
+        if not programs:
+            _err("*No matching observing-log entries in the selected window.")
+            return 1
+
+        def altitude(ra, dec, when):
+            return site.ra_dec_to_alt_az(ra, dec, site.lst_in_rads(when))[0]
+
+        alt_min, alt_max = 15.0, 90.0
+        fig, ax = plt.subplots(figsize=(14, 8))
+
+        # night boundaries and the altitude floor
+        for boundary in (obs_start, obs_end):
+            ax.plot([boundary, boundary], [alt_min, alt_max], "r--")
+        ax.plot([obs_start - pad, obs_end + pad], [alt_min + 10] * 2, "r--")
+
+        # moon altitude track
+        moon_grid = [obs_start + i * (obs_end - obs_start) / 100 for i in range(101)]
+        moon_alts = []
+        for when in moon_grid:
+            moon_ra, moon_dec = site.moon_ra_dec(when)
+            moon_alts.append(altitude(moon_ra, moon_dec, when))
+        ax.plot(moon_grid, moon_alts, "--", color="black", label="Moon")
+
+        colors: dict[str, str] = {}
+        for program in programs:
+            minutes = int((program["end"] - program["start"]).total_seconds() // 60)
+            grid = [
+                program["start"] + dt.timedelta(minutes=i)
+                for i in range(max(minutes, 1) + 1)
+            ]
+            alts = [altitude(program["ra"], program["dec"], t) for t in grid]
+
+            label = None if program["name"] in colors else program["name"]
+            style = "--" if program["aborted"] else "-"
+            (line,) = ax.plot(
+                grid, alts, style, color=colors.get(program["name"]), label=label
+            )
+            colors.setdefault(program["name"], line.get_color())
+            if not program["aborted"]:
+                ax.fill_between(
+                    grid, alts, alt_min, facecolor=colors[program["name"]], alpha=0.5
+                )
+
+            # hourly moon-distance annotations along the track
+            target_pos = Position.from_ra_dec(program["ra"], program["dec"])
+            for t, alt in zip(grid[::60], alts[::60]):
+                moon_ra, moon_dec = site.moon_ra_dec(t)
+                separation = float(
+                    target_pos.angsep(Position.from_ra_dec(moon_ra, moon_dec))
+                )
+                ax.text(t, alt, f"{separation:.0f}")
+
+        kind = "Simulation" if args.simulation else "Observed"
+        ax.set_title(f"robobs {kind} — night of {obs_start.date()}")
+        ax.set_xlim(obs_start - pad, obs_end + pad)
+        ax.set_ylim(alt_min, alt_max)
+        ax.set_ylabel("Altitude (deg)")
+        ax.xaxis.set_major_formatter(DateFormatter("%H:%M"))
+        fig.autofmt_xdate(rotation=70)
+        ax.legend(loc="upper right", fontsize="small")
+        fig.savefig(args.filename, bbox_inches="tight")
+        plt.close(fig)
+        _out(f"-Plot saved to {args.filename}")
+        return 0
+    finally:
+        bus.shutdown()
+
+
+# ----------------------------------------------------------------------
 # queue handling
 # ----------------------------------------------------------------------
 
@@ -1325,6 +1480,27 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--start", default=None, help="only entries after this time")
     p.add_argument("--end", default=None, help="only entries up to this time")
     p.set_defaults(func=cmd_observing_log)
+
+    p = sub.add_parser(
+        "plot-log",
+        help="plot the observing-log altitude chart (needs matplotlib)",
+    )
+    p.add_argument(
+        "-f",
+        "--file",
+        dest="filename",
+        default="obsplan.png",
+        help="output image file (default: obsplan.png)",
+    )
+    p.add_argument(
+        "--simulation",
+        "--sim",
+        action="store_true",
+        help="plot 'Simulation:' entries (from process-queue) instead of "
+        "observed programs",
+    )
+    _add_time_options(p)
+    p.set_defaults(func=cmd_plot_log)
 
     for name, func, doc in (
         ("start", cmd_start, "switch the robobs controller on"),

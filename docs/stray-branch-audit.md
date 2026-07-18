@@ -35,28 +35,16 @@ use `past_meridian_only`, which only ever existed there).
 
 ## Lost robobs features — candidates, not applied
 * **Park-then-STOP on empty queue** (`bugfix/observation_after_night_end`
-  `ab7ecd3`) — after queuing the SAFETY park program, the branch *stopped*
-  robobs entirely ("prevents observations after the night ends"); 2.0
-  instead parks once and retries every 5 minutes (interruptible).  The
-  retry behavior recovers automatically when programs appear; the stop
-  behavior is safer at dawn.  Open design decision — could become a config
-  option (`stop_when_empty`).
-* **`reset_scheduler()` on `start()`** (`mysql` `e91e84f`) — on the branch,
-  switching robobs on first *deleted every program in the chimera scheduler
-  queue* (stale-queue cleanup after a restart).  2.0 deleted
-  `reset_scheduler` as dead code (master never called it).  Worth
-  considering as an explicit `clean_scheduler_on_start` config, since a
-  stale chimera queue after a crash means re-observing old programs.
+  `ab7ecd3`) — superseded: the night-window guard removes the daylight
+  hazard the stop protected against, and tracking is stopped after every
+  program (see the follow-up below), while the 5-minute retry keeps
+  mid-night Timed recovery.
+* **`reset_scheduler()` on `start()`** (`mysql` `e91e84f`) — recovered as
+  the `clean_scheduler_on_start` config option (see follow-up below).
 * **`--yesterday` option** (`compress` `5bab1ac`) — shifted the scheduling
   window one day back for re-planning/re-plotting the previous night.
   Superseded in practice by 2.0's `--jd-start/--jd-end/--date-start/
   --date-end`, but the one-flag convenience is gone.
-* **Observing-plan plotting improvements** (`mysql` `93beae0`, `7ad3ebe`) —
-  aborted programs drawn dashed, per-track moon-distance annotations,
-  `-f` output-filename option, robust start/end mismatch handling.  Lost
-  together with the whole `makeObservingLog` plotting feature, which the
-  2.0 port dropped (documented in `robobs-port-notes.md`).  Only relevant
-  if plotting is ever resurrected.
 
 ## Superseded or deliberately not carried
 
@@ -136,15 +124,19 @@ the guard is external: the supervisor's `StopRobObsEnd` checklist
 `LockDomeOnSunrise`; if the supervisor is down or its window conditions
 don't match, nothing protects the telescope from pointing near the Sun.
 
-Recommendations (not yet implemented):
+Follow-up (implemented 2026-07-17):
 
-1. Night-window guard in `check_conditions`: it is daytime whenever the
-   next `sunset_twilight_end` comes before the next
-   `sunrise_twilight_begin`; reject in that case.  Closes the gap for all
-   paths, including a manual `wake` at 3 pm.
-2. Optional `stop_when_empty` config reproducing `ab7ecd3` (park once,
-   then `stop()`); default off to keep mid-night Timed recovery.  The
-   supervisor's `OpenAndStartRobObs` checklist restarts robobs at dusk.
-3. `clean_scheduler_on_start` (mysql `e91e84f`): wipe the chimera queue
-   when robobs starts, so a crashed night's stale programs aren't
-   re-executed.
+1. **Night-window guard** in `check_conditions`: daytime (next
+   `sunset_twilight_end` before next `sunrise_twilight_begin`) rejects
+   outright — closes the gap for all paths, including a manual `wake` at
+   3 pm.
+2. Instead of `stop_when_empty`: **tracking is stopped after every
+   finished program** (`telescope` config key, `program_complete`
+   watcher, off the bus dispatch pool) so the mount never tracks into a
+   limit regardless of what happens next.
+3. **`clean_scheduler_on_start`** (default on): switching robobs on wipes
+   stale programs from the chimera scheduler queue (mysql `e91e84f`).
+4. The **plotting feature** was resurrected as `chimera-robobs plot-log`
+   with the mysql-branch improvements (aborted programs dashed, hourly
+   moon-distance annotations, `-f` output file, robust start/end pairing,
+   Simulation/Observed title); matplotlib is an optional extra.

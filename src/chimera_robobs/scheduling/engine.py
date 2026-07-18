@@ -268,6 +268,22 @@ class RobObsEngine:
             date_time = datetime_from_mjd(time)
             lst = self.site.lst_in_rads(date_time)  # in radians
 
+            # 0) it must be night.  The sun is up whenever the *next*
+            # sunset twilight comes before the *next* sunrise twilight.
+            # Without this guard a program left unfinished at dawn kept
+            # being re-evaluated (and could be executed) in full daylight —
+            # the pre-2.0 "observations after the night ends" failure.
+            next_dusk = self.site.sunset_twilight_end(date_time).replace(tzinfo=None)
+            next_dawn = self.site.sunrise_twilight_begin(date_time).replace(tzinfo=None)
+            if next_dusk < next_dawn:
+                self.log.warning(
+                    "Daytime @ %s (next dusk %s < next dawn %s): not observable.",
+                    date_time,
+                    next_dusk,
+                    next_dawn,
+                )
+                return False
+
             # 1) check airmass
             alt, _ = self.site.ra_dec_to_alt_az(
                 target.target_ra, target.target_dec, lst
@@ -290,9 +306,7 @@ class RobObsEngine:
             if program_length > 0.0:
                 end_mjd = time + program_length / SECONDS_PER_DAY
                 observation_end = datetime_from_mjd(end_mjd).replace(tzinfo=None)
-                night_end = self.site.sunrise_twilight_begin(date_time).replace(
-                    tzinfo=None
-                )
+                night_end = next_dawn
                 if observation_end > night_end:
                     self.log.warning(
                         "Block finish @ %s. Night end is @ %s!",

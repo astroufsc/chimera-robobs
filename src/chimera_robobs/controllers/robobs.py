@@ -137,11 +137,16 @@ class RobObs(ChimeraObject):
     __config__ = {
         "site": "/Site/0",
         "schedulers": "/Scheduler/0",
+        # telescope whose tracking is stopped after each finished program
+        "telescope": "/Telescope/0",
         "weatherstations": None,
         "seeingmonitors": None,
         "cloudsensors": None,
         # robobs scheduling database (default: ~/.chimera/robobs.db)
         "database": None,
+        # wipe the chimera scheduler queue when robobs is switched on, so a
+        # stale queue from a previous run is not re-executed
+        "clean_scheduler_on_start": True,
     }
 
     def __init__(self):
@@ -225,8 +230,27 @@ class RobObs(ChimeraObject):
 
     def start(self) -> bool:
         self.log.debug("Switching robstate on...")
+        if self["clean_scheduler_on_start"]:
+            self._clean_scheduler_queue()
         self.rob_state = RobState.ON
         return True
+
+    def _clean_scheduler_queue(self):
+        """Delete every queued chimera scheduler program (recovered
+        mysql-branch behavior, e91e84f): a stale queue left by a previous
+        run would otherwise be re-executed."""
+        csession = chimera_model.Session()
+        try:
+            programs = csession.query(chimera_model.Program).all()
+            for program in programs:
+                csession.delete(program)
+            if programs:
+                self.log.info(
+                    "Removed %i stale program(s) from the scheduler queue.",
+                    len(programs),
+                )
+        finally:
+            csession.commit()
 
     def stop(self) -> bool:
         self.log.debug("Switching robstate off...")
@@ -358,6 +382,29 @@ class RobObs(ChimeraObject):
         finally:
             csession.commit()
             rsession.commit()
+
+        # a finished program must never leave the telescope tracking
+        # indefinitely (it would eventually run into a mount limit).  Run
+        # on its own thread: event watchers execute on the bus dispatch
+        # pool, and issuing bus requests inline there can deadlock it.
+        threading.Thread(
+            target=self._stop_telescope_tracking,
+            name="robobs-tracking-stop",
+            daemon=True,
+        ).start()
+
+    def _stop_telescope_tracking(self):
+        location = self["telescope"]
+        # a string-typed chimera config key coerces None to "None"
+        if not location or str(location).lower() in ("none", ""):
+            return
+        try:
+            telescope = self.get_proxy(str(location).split(",")[0].strip())
+            if telescope.is_tracking():
+                telescope.stop_tracking()
+                self.log.info("Tracking stopped after program completion.")
+        except Exception:
+            self.log.exception("Could not stop telescope tracking.")
 
     def _watch_action_begin(self, action_id, message):
         self.log.debug("Action %s %s ...", action_id, message)

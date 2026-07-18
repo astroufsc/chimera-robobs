@@ -24,7 +24,7 @@ from chimera_robobs.scheduling import model
 from chimera_robobs.scheduling.algorithms import build_algorithms
 from chimera_robobs.scheduling.engine import RobObsEngine
 
-from .fakes import FakeSchedulerProxy, FakeSite
+from .fakes import FakeSchedulerProxy, FakeSite, FakeTelescopeProxy
 
 
 @pytest.fixture
@@ -53,6 +53,8 @@ def rob(tmp_path, chimera_session):
     )
     controller._fake_scheduler = FakeSchedulerProxy()
     controller.get_scheduler = lambda: controller._fake_scheduler
+    controller._fake_telescope = FakeTelescopeProxy()
+    controller.get_proxy = lambda location=None: controller._fake_telescope
     controller.machine = Machine(controller)
     return controller
 
@@ -261,3 +263,57 @@ def test_program_begin_writes_observing_log(rob, chimera_session):
 
     # unknown ids must not blow up
     rob._watch_program_begin(99999)
+
+
+def test_start_cleans_stale_scheduler_queue(rob, chimera_session):
+    """Recovered mysql-branch behavior (e91e84f): switching robobs on wipes
+    programs left over in the chimera scheduler queue."""
+    csession = chimera_session()
+    stale = chimera_model.Program(name="STALE", pi="OLD", priority=1)
+    stale.actions.append(chimera_model.Expose(frames=1, exptime=1))
+    csession.add(stale)
+    csession.commit()
+
+    assert rob.start() is True
+    csession = chimera_session()
+    assert csession.query(chimera_model.Program).count() == 0
+    assert csession.query(chimera_model.Action).count() == 0
+
+    # configurable: with the option off the queue is preserved
+    rob["clean_scheduler_on_start"] = False
+    csession.add(chimera_model.Program(name="KEEP", pi="OLD", priority=1))
+    csession.commit()
+    rob.start()
+    assert chimera_session().query(chimera_model.Program).count() == 1
+
+
+def test_program_complete_stops_telescope_tracking(rob, chimera_session):
+    """Any finished program stops the telescope tracking so the mount never
+    tracks into a limit."""
+    _populate_program(rob)
+    rob.rob_state = RobState.ON
+    rob._handle_scheduler_idle()
+    cprogram = chimera_session().query(chimera_model.Program).one()
+
+    rob._watch_program_complete(cprogram.id, "OK")
+    assert _wait_for(lambda: "stop_tracking" in rob._fake_telescope.calls)
+
+    # not tracking: checked but not commanded
+    rob._fake_telescope.calls.clear()
+    rob._fake_telescope.tracking = False
+    rob._watch_program_complete(cprogram.id, "ERROR", "boom")
+    assert _wait_for(lambda: "is_tracking" in rob._fake_telescope.calls)
+    time.sleep(0.05)
+    assert "stop_tracking" not in rob._fake_telescope.calls
+
+
+def test_tracking_stop_disabled_without_telescope(rob, chimera_session):
+    rob["telescope"] = None
+    _populate_program(rob)
+    rob.rob_state = RobState.ON
+    rob._handle_scheduler_idle()
+    cprogram = chimera_session().query(chimera_model.Program).one()
+
+    rob._watch_program_complete(cprogram.id, "OK")
+    time.sleep(0.1)
+    assert rob._fake_telescope.calls == []

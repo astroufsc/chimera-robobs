@@ -164,6 +164,7 @@ def test_every_subcommand_has_help():
         "clean-queue",
         "process-queue",
         "observing-log",
+        "plot-log",
         "start",
         "stop",
         "wake",
@@ -172,3 +173,68 @@ def test_every_subcommand_has_help():
         with pytest.raises(SystemExit) as excinfo:
             cli.main([command, "--help"])
         assert excinfo.value.code == 0
+
+
+def test_plot_log_simulation(populated, fake_connect, tmp_path):
+    """plot-log resurrects the legacy altitude chart with the mysql-branch
+    improvements (aborted dashed, moon annotations, -f output)."""
+    pytest.importorskip("matplotlib")
+    db = populated
+    assert _run(db, "make-queue", "--pid", "P01", *_window_args()) == 0
+    assert _run(db, "process-queue", *_window_args()) == 0
+
+    # add an aborted program: a start with no matching end
+    session = _session(db)
+    target = session.query(model.Target).first()
+    session.add(
+        model.ObservingLog(
+            time=session.query(model.ObservingLog).first().time,
+            target_id=target.id,
+            name=target.name,
+            priority=1,
+            action="Simulation: Acquisition Start",
+        )
+    )
+    session.commit()
+
+    out = tmp_path / "plot.png"
+    assert _run(db, "plot-log", "--simulation", "-f", str(out), *_window_args()) == 0
+    assert out.exists() and out.stat().st_size > 0
+
+    # without entries in the window the command fails cleanly
+    empty = tmp_path / "empty.png"
+    assert _run(db, "plot-log", "-f", str(empty), *_window_args()) == 1
+    assert not empty.exists()
+
+
+def test_pair_observing_log_marks_aborted(tmp_path):
+    import datetime as dt
+
+    from chimera_robobs.cli.robobs import _pair_observing_log
+
+    factory = model.open_database(str(tmp_path / "robobs.db"))
+    session = factory()
+    target = model.Target(name="tgt", target_ra=10.0, target_dec=0.0)
+    session.add(target)
+    session.commit()
+
+    t0 = dt.datetime(2026, 7, 6, 1, 0, 0)
+
+    def entry(minutes, action):
+        return model.ObservingLog(
+            time=t0 + dt.timedelta(minutes=minutes),
+            target_id=target.id,
+            name=target.name,
+            action=action,
+        )
+
+    entries = [
+        entry(0, "ROBOBS: Program Started"),  # aborted (no end before next)
+        entry(10, "ROBOBS: Program Started"),
+        entry(20, "ROBOBS: Program End with status OK(None)"),
+        entry(30, "ROBOBS: Program Started"),  # trailing aborted
+    ]
+    programs = _pair_observing_log(session, entries, "Program Started", "Program End")
+    assert [p["aborted"] for p in programs] == [True, False, True]
+    assert programs[0]["end"] == entries[1].time  # closed at the next start
+    assert programs[2]["end"] == entries[3].time + dt.timedelta(minutes=1)
