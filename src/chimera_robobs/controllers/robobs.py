@@ -22,9 +22,8 @@ from chimera.core.constants import SYSTEM_CONFIG_DIRECTORY
 from chimera.util.coord import Coord
 from chimera.util.position import Position
 
-from chimera_robobs.scheduling import algorithms
-from chimera_robobs.scheduling.algorithms import ALGORITHMS
-from chimera_robobs.scheduling.dates import datetime_from_jd
+from chimera_robobs.scheduling.algorithms import build_algorithms
+from chimera_robobs.scheduling.dates import datetime_from_mjd
 from chimera_robobs.scheduling.engine import RobObsEngine
 from chimera_robobs.scheduling.machine import Machine
 from chimera_robobs.scheduling.model import ObservingLog, open_database
@@ -71,14 +70,15 @@ class RobObs(ChimeraObject):
         self._setup_debug_log()
 
         self._session = open_database(self["database"])
-        algorithms.configure(self._session)
 
         self._site = SiteAdapter(self.get_proxy(self["site"]))
+        self._algorithms = build_algorithms(self._session, self._site)
         self.engine = RobObsEngine(
             self._session,
             self._site,
             log=self._debuglog,
             seeing=self._get_seeing if self["seeingmonitors"] is not None else None,
+            algorithms=self._algorithms,
         )
 
         # event subscription happens on the first control() tick: during
@@ -87,8 +87,6 @@ class RobObs(ChimeraObject):
 
         self.machine = Machine(self)
         self.machine.start()
-
-        self._inject_instrument()
 
     def control(self):
         """One-shot: subscribe to scheduler events once the bus is up, then
@@ -172,14 +170,6 @@ class RobObs(ChimeraObject):
             self._debuglog.exception("Could not get seeing measurement.")
             return -1.0
 
-    def _inject_instrument(self):
-        for algorithm in ALGORITHMS.values():
-            try:
-                algorithm.site = self._site
-            except Exception as e:
-                self.log.error("Could not inject site on %s handler", algorithm)
-                self.log.exception(e)
-
     # ------------------------------------------------------------------
     # scheduler events
     # ------------------------------------------------------------------
@@ -231,9 +221,7 @@ class RobObs(ChimeraObject):
             self._debuglog.debug("Program %s started", program)
 
             log_entry = ObservingLog(
-                time=datetime_from_jd(self._site.mjd() + 2400000.5).replace(
-                    tzinfo=None
-                ),
+                time=datetime_from_mjd(self._site.mjd()).replace(tzinfo=None),
                 target_id=program.tid,
                 name=program.name,
                 priority=program.priority,
@@ -255,9 +243,7 @@ class RobObs(ChimeraObject):
 
             if program is not None:
                 log_entry = ObservingLog(
-                    time=datetime_from_jd(self._site.mjd() + 2400000.5).replace(
-                        tzinfo=None
-                    ),
+                    time=datetime_from_mjd(self._site.mjd()).replace(tzinfo=None),
                     target_id=program.tid,
                     name=program.name,
                     priority=program.priority,
@@ -272,8 +258,8 @@ class RobObs(ChimeraObject):
                 rsession.commit()
 
                 block_config = rsession.merge(self._current_program[1])
-                sched = ALGORITHMS[block_config.sched_algorithm]
-                sched.observed(self._site.mjd(), self._current_program, self._site)
+                sched = self._algorithms[block_config.sched_algorithm]
+                sched.observed(self._site.mjd(), self._current_program)
                 rsession.commit()
 
                 self._current_program = None

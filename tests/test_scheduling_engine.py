@@ -6,7 +6,7 @@ import math
 
 import pytest
 
-from chimera_robobs.scheduling import algorithms, model
+from chimera_robobs.scheduling import model
 from chimera_robobs.scheduling.engine import RobObsEngine
 
 from .fakes import FakeSite
@@ -16,9 +16,7 @@ LOG = logging.getLogger("test-engine")
 
 @pytest.fixture
 def session_factory(tmp_path):
-    factory = model.open_database(str(tmp_path / "robobs.db"))
-    algorithms.configure(factory)
-    return factory
+    return model.open_database(str(tmp_path / "robobs.db"))
 
 
 def _add_program(session, pid, priority, slew_at, ra=10.0, dec=0.0, max_airmass=2.5):

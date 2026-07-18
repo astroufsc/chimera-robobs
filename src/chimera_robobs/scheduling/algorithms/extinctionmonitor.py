@@ -3,9 +3,9 @@
 
 """Extinction-monitor scheduling algorithm (id 1, name STD).
 
-Ported from the legacy ``extintionmonitor.py`` (typo fixed in the module
-name; the algorithm name string and id are unchanged because they are stored
-in the database).
+Schedules standard stars so each is observed at ``nairmass`` different
+airmasses during the night (the algorithm name string "STD" and id 1 are
+stored in the database and must not change).
 """
 
 import logging
@@ -16,31 +16,32 @@ from chimera.util.position import Position
 from chimera_robobs.scheduling.algorithms.base import (
     BaseScheduleAlgorithm,
     ExtinctionMonitorError,
-    get_session,
+    airmass,
 )
-from chimera_robobs.scheduling.algorithms.base import (
-    airmass as _airmass,
-)
-from chimera_robobs.scheduling.dates import datetime_from_jd
-from chimera_robobs.scheduling.model import ExtMoniDB, ObservedAM
+from chimera_robobs.scheduling.dates import datetime_from_jd, datetime_from_mjd
+from chimera_robobs.scheduling.model import ExtMoniDB, ObservedAM, block_duration
 
 log = logging.getLogger(__name__)
+
+#: numpy dtype of the observing slots built by process()
+SLOT_DTYPE = [
+    ("start", float),
+    ("end", float),
+    ("slotid", int),
+    ("blockid", int),
+    ("filled", int),
+]
 
 
 class ExtinctionMonitor(BaseScheduleAlgorithm):
     """Schedule standard stars over a range of airmasses."""
 
-    @staticmethod
-    def name() -> str:
-        return "STD"
+    id = 1
+    name = "STD"
+    default_slot_len = 60.0
 
-    @staticmethod
-    def id() -> int:
-        return 1
-
-    @staticmethod
-    def clean(pid):
-        session = get_session()
+    def clean(self, pid):
+        session = self.session()
         try:
             ext_moni_blocks = session.query(ExtMoniDB).filter(ExtMoniDB.pid == pid)
             for block in ext_moni_blocks:
@@ -50,9 +51,8 @@ class ExtinctionMonitor(BaseScheduleAlgorithm):
         finally:
             session.commit()
 
-    @staticmethod
-    def soft_clean(pid, block=None):
-        session = get_session()
+    def soft_clean(self, pid, block=None):
+        session = self.session()
         try:
             ext_moni_blocks = session.query(ExtMoniDB).filter(ExtMoniDB.pid == pid)
             for ext_block in ext_moni_blocks:
@@ -61,9 +61,8 @@ class ExtinctionMonitor(BaseScheduleAlgorithm):
         finally:
             session.commit()
 
-    @staticmethod
-    def add(block):
-        session = get_session()
+    def add(self, block):
+        session = self.session()
         try:
             obsblock = session.merge(block[0])
             # Check if this is already in the database
@@ -87,49 +86,43 @@ class ExtinctionMonitor(BaseScheduleAlgorithm):
         finally:
             session.commit()
 
-    @staticmethod
-    def process(*args, **kwargs):
-        slot_len = 60.0
-        if "slotLen" in kwargs:
-            slot_len = kwargs["slotLen"]
-        elif len(args) > 1:
-            try:
-                slot_len = float(args[0])
-            except (TypeError, ValueError):
-                slot_len = 60.0
+    def process(
+        self,
+        *,
+        obs_start,
+        obs_end,
+        query,
+        config=None,
+        slot_len=None,
+        overheads=None,
+    ):
+        config = config or {}
+        slot_len = self._slot_len(config, slot_len)
+        site = self.site
 
         # Selecting standard stars is not only searching for the highest in
         # that time, but selecting stars that can be observed at 3 or more
         # (nairmass) different airmasses.
 
-        nightstart = kwargs["obsStart"]
-        nightend = kwargs["obsEnd"]
+        nightstart = obs_start
+        nightend = obs_end
         time_grid = np.arange(nightstart, nightend, slot_len / 60.0 / 60.0 / 24.0)
-        site = kwargs["site"]
-        targets = kwargs["query"]
-        rows = targets[:]
+        rows = query[:]
 
-        nstars = 3
-        nairmass = 3
+        nstars = config.get("nstars", 3)
+        nairmass = config.get("nairmass", 3)
 
-        overheads = {
+        default_overheads = {
             "autofocus": {"align": 0.0, "set": 0.0},
             "point": 0.0,
             "readout": 0.0,
         }
-
-        if "overheads" in kwargs:
-            overheads.update(kwargs["overheads"])
-
-        if "config" in kwargs:
-            config = kwargs["config"]
-            if "nstars" in config:
-                nstars = config["nstars"]
-            if "nairmass" in config:
-                nairmass = config["nairmass"]
+        if overheads:
+            default_overheads.update(overheads)
+        overheads = default_overheads
 
         min_altitude = 10.0
-        max_airmass_default = 1.0 / np.cos(np.pi / 2.0 - np.pi / 18.0)
+        max_airmass_default = airmass(min_altitude)
 
         radec_array = np.array(
             [Position.from_ra_dec(rows[0][2].target_ra, rows[0][2].target_dec)]
@@ -137,19 +130,12 @@ class ExtinctionMonitor(BaseScheduleAlgorithm):
         target_name_array = np.array([rows[0][2].name])
 
         # Create observation slots.
-        slot_dtype = [
-            ("start", float),
-            ("end", float),
-            ("slotid", int),
-            ("blockid", int),
-            ("filled", int),
-        ]
-        obs_slots = np.array([], dtype=slot_dtype)
+        obs_slots = np.array([], dtype=SLOT_DTYPE)
 
         blockid = rows[0][0].blockid
         radec_pos = np.array([0])
         blockid_list = np.array([blockid])
-        block_duration = np.array([0.0])  # duration of each block
+        block_duration_list = np.array([0.0])  # duration of each block
         max_airmass = np.array([rows[0][1].max_airmass])
         min_airmass = np.array([rows[0][1].min_airmass])
         if max_airmass[0] < 0:
@@ -178,18 +164,14 @@ class ExtinctionMonitor(BaseScheduleAlgorithm):
                 else:
                     min_airmass = np.append(min_airmass, max_airmass_default)
 
-                block_duration = np.append(block_duration, 0.0)
+                block_duration_list = np.append(block_duration_list, 0.0)
 
-            for blk_action in row[0].actions:
-                if blk_action.__tablename__ == "action_expose":
-                    block_duration[-1] += (
-                        blk_action.exptime + overheads["readout"]
-                    ) * blk_action.frames
-                elif blk_action.__tablename__ == "action_focus":
-                    if blk_action.step > 0:
-                        block_duration[-1] += overheads["autofocus"]["align"]
-                    elif blk_action.step == 0:
-                        block_duration[-1] += overheads["autofocus"]["set"]
+            block_duration_list[-1] += block_duration(
+                row[0].actions,
+                readout=overheads["readout"],
+                autofocus_sweep=overheads["autofocus"]["align"],
+                autofocus_set=overheads["autofocus"]["set"],
+            )
 
         # Start allocating
         # get lst at the middle of the observing window
@@ -206,7 +188,7 @@ class ExtinctionMonitor(BaseScheduleAlgorithm):
             ra_h = radec_array[nblock].ra.hour
             dec_d = radec_array[nblock].dec.deg
             max_altitude, _ = site.ra_dec_to_alt_az(ra_h, dec_d, olst)
-            min_am = 1.0 / np.cos(np.pi / 2.0 - max_altitude * np.pi / 180.0)
+            min_am = airmass(max_altitude)
 
             log.debug("Altitude max/min: %.2f/%.2f", max_altitude, min_altitude)
             log.debug("Airmass max/min: %.2f/%.2f", max_airmass[nblock], min_am)
@@ -232,14 +214,14 @@ class ExtinctionMonitor(BaseScheduleAlgorithm):
             minalt *= 1.1
             desire_alt = np.linspace(minalt, max_altitude, nairmass)
             # set desired airmasses
-            dair_mass = 1.0 / np.cos(np.pi / 2.0 - desire_alt * np.pi / 180.0)
+            dair_mass = np.array([airmass(alt) for alt in desire_alt])
             dair_mass.sort()
             # Decide the start and end times for allocation
             start = nightstart
             end = nightend
 
             # find times where the object is at the desired airmasses
-            allocate_slot = np.array([], dtype=slot_dtype)
+            allocate_slot = np.array([], dtype=SLOT_DTYPE)
 
             start = max(start, nightstart)
             end = min(end, nightend)
@@ -249,7 +231,7 @@ class ExtinctionMonitor(BaseScheduleAlgorithm):
             lst_grid = [site.lst_in_rads(datetime_from_jd(tt)) for tt in time_grid]
             airmass_grid = np.array(
                 [
-                    _airmass(site.ra_dec_to_alt_az(ra_h, dec_d, lst)[0])
+                    airmass(site.ra_dec_to_alt_az(ra_h, dec_d, lst)[0])
                     for lst in lst_grid
                 ]
             )
@@ -356,13 +338,14 @@ class ExtinctionMonitor(BaseScheduleAlgorithm):
                             [
                                 (
                                     time,
-                                    time + block_duration[nblock] / 60.0 / 60.0 / 24.0,
+                                    time
+                                    + block_duration_list[nblock] / 60.0 / 60.0 / 24.0,
                                     nballoc_tmp,
                                     blockid_list[nblock],
                                     True,
                                 )
                             ],
-                            dtype=slot_dtype,
+                            dtype=SLOT_DTYPE,
                         ),
                     )
                 else:
@@ -412,19 +395,18 @@ class ExtinctionMonitor(BaseScheduleAlgorithm):
 
         return obs_slots
 
-    @staticmethod
-    def next(time, programs):
+    def next(self, now_mjd, programs):
         log.debug("Selecting target with ExtinctionMonitor algorithm.")
 
-        site = ExtinctionMonitor.site
-        mjd = time
-        lst = site.lst_in_rads(datetime_from_jd(time + 2400000.5))
+        site = self.site
+        mjd = now_mjd
+        lst = site.lst_in_rads(datetime_from_mjd(now_mjd))
 
         observe_program = None
         waittime = 1.0
         slew_at = mjd
 
-        session = get_session()
+        session = self.session()
 
         try:
             for program in programs:
@@ -497,13 +479,13 @@ class ExtinctionMonitor(BaseScheduleAlgorithm):
                     )
                     slew_at = program[0].slew_at
                     for tt in np.linspace(mjd, program[0].slew_at, 10):
-                        observe_lst = site.lst_in_rads(datetime_from_jd(tt + 2400000.5))
+                        observe_lst = site.lst_in_rads(datetime_from_mjd(tt))
                         alt, _ = site.ra_dec_to_alt_az(ra_h, dec_d, observe_lst)
                         log.debug(
                             "Slew@: %.2f (alt/airmass: %.2f/%.3f )",
                             tt,
                             alt,
-                            1.0 / np.cos(np.pi / 2.0 - alt * np.pi / 180.0),
+                            airmass(alt),
                         )
 
                         if minalt < alt < maxalt:
@@ -555,13 +537,11 @@ class ExtinctionMonitor(BaseScheduleAlgorithm):
             session.commit()
         return observe_program
 
-    @staticmethod
-    def observed(time, program, site=None, soft=False):
-        if site is None:
-            site = ExtinctionMonitor.site
-        lst = site.lst_in_rads(datetime_from_jd(time + 2400000.5))
+    def observed(self, time, program, soft=False):
+        site = self.site
+        lst = site.lst_in_rads(datetime_from_mjd(time))
 
-        session = get_session()
+        session = self.session()
         try:
             prog = session.merge(program[0])
             prog.finished = True
@@ -570,7 +550,8 @@ class ExtinctionMonitor(BaseScheduleAlgorithm):
             extmoni_info = (
                 session.query(ExtMoniDB)
                 .filter(
-                    ExtMoniDB.pid == prog.pid, ExtMoniDB.target_id == prog.target_id
+                    ExtMoniDB.pid == prog.pid,
+                    ExtMoniDB.target_id == prog.target_id,
                 )
                 .first()
             )
@@ -580,7 +561,7 @@ class ExtinctionMonitor(BaseScheduleAlgorithm):
                 )
 
             alt, _ = site.ra_dec_to_alt_az(target.target_ra, target.target_dec, lst)
-            observed_am = ObservedAM(airmass=_airmass(alt), altitude=alt)
+            observed_am = ObservedAM(airmass=airmass(alt), altitude=alt)
 
             extmoni_info.observed_am.append(observed_am)
 

@@ -533,3 +533,31 @@ class Expose(Action):
         ca.filename = self.filename
         ca.object_name = self.object_name
         return ca
+
+
+def block_duration(
+    actions,
+    readout: float = 0.0,
+    autofocus_sweep: float = 0.0,
+    autofocus_set: float = 0.0,
+) -> float:
+    """Estimated duration in seconds of a sequence of block actions.
+
+    Only exposures and autofocus runs contribute; the overhead constants
+    differ per caller (engine program length: no overheads; CLI block
+    ingest: 12 s readout + 600 s focus sweep; offline simulation: 20 s
+    readout; extinction monitor: config-driven), so they are parameters.
+    ``AutoFocus.step > 0`` is a focus sweep; ``step == 0`` is the "set
+    focuser position" sentinel used at T80S; ``step < 0`` takes no time.
+    """
+    total = 0.0
+    for act in actions:
+        if isinstance(act, Expose):
+            total += (float(act.exptime or 0.0) + readout) * int(act.frames or 1)
+        elif isinstance(act, AutoFocus):
+            step = act.step or 0
+            if step > 0:
+                total += autofocus_sweep
+            elif step == 0:
+                total += autofocus_set
+    return total

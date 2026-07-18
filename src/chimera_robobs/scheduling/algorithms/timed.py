@@ -4,78 +4,63 @@
 """Timed scheduling algorithm (id 2, name TIMED).
 
 Schedules observations at specific times (in hours) with respect to the
-night start twilight.
+night start twilight.  Targets are selected with the :class:`Higher`
+algorithm; the requested times are kept in the ``timeddb`` table and
+override the selected program's ``slew_at``.
 """
 
 import logging
 
-from chimera_robobs.scheduling.algorithms.base import (
-    BaseScheduleAlgorithm,
-    TimedError,
-    get_session,
-)
+from chimera_robobs.scheduling.algorithms.base import TimedError
 from chimera_robobs.scheduling.algorithms.higher import Higher
+from chimera_robobs.scheduling.dates import MJD_JD_OFFSET
 from chimera_robobs.scheduling.model import TimedDB
 
 log = logging.getLogger(__name__)
 
 
-class Timed(BaseScheduleAlgorithm):
-    @staticmethod
-    def name() -> str:
-        return "TIMED"
+class Timed(Higher):
+    id = 2
+    name = "TIMED"
+    default_slot_len = 1800.0
+    timed_constraint = True
 
-    @staticmethod
-    def id() -> int:
-        return 2
-
-    @staticmethod
-    def process(*args, **kwargs):
+    def process(self, *, obs_start, obs_end, query, config=None, slot_len=None):
         # Try to read times from the configuration. If none is provided,
         # raise an exception.
-        if "config" not in kwargs:
+        if config is None:
             raise TimedError("No configuration file provided.")
 
-        config = kwargs["config"]
-
-        nightstart = kwargs["obsStart"]
-        nightend = kwargs["obsEnd"]
-
-        for i in range(len(config["times"])):
-            execute_at = nightstart - 2400000.5 + (config["times"][i] / 24.0)
+        execute_at_mjds = [
+            obs_start - MJD_JD_OFFSET + (hours / 24.0) for hours in config["times"]
+        ]
+        for i, execute_at in enumerate(execute_at_mjds):
             log.debug("Executing time %i @ %.5f", i, execute_at)
-            config["times"][i] = execute_at
-
-        slot_len = 1800.0
-        if "slotLen" in kwargs:
-            slot_len = kwargs["slotLen"]
-        elif len(args) > 1:
-            try:
-                slot_len = float(args[0])
-            except (TypeError, ValueError):
-                slot_len = 1800.0
 
         # Select targets with the Higher algorithm
-        kwargs.pop("slotLen", None)
-        programs = Higher.process(slotLen=slot_len, *args, **kwargs)
+        programs = super().process(
+            obs_start=obs_start,
+            obs_end=obs_end,
+            query=query,
+            config=config,
+            slot_len=slot_len,
+        )
 
-        session = get_session()
         # Store the desired times in the database
+        session = self.session()
         try:
-            for obs_time in config["times"]:
-                if obs_time > nightend:
+            for execute_at in execute_at_mjds:
+                if execute_at > obs_end:
                     log.warning("Request for observation after the end of the night.")
 
-                log.info("Requesting observation @ %.3f", obs_time)
-                timed = TimedDB(pid=config["pid"], execute_at=obs_time)
-                session.add(timed)
+                log.info("Requesting observation @ %.3f", execute_at)
+                session.add(TimedDB(pid=config["pid"], execute_at=execute_at))
             return programs
         finally:
             session.commit()
 
-    @staticmethod
-    def next(time, programs):
-        session = get_session()
+    def next(self, now_mjd, programs):
+        session = self.session()
 
         try:
             program = session.merge(programs[0][0])
@@ -89,7 +74,7 @@ class Timed(BaseScheduleAlgorithm):
             if timed_observation is None:
                 return None
 
-            program_list = Higher.next(time, programs)
+            program_list = super().next(now_mjd, programs)
 
             program = session.merge(program_list[0])
 
@@ -105,9 +90,8 @@ class Timed(BaseScheduleAlgorithm):
         finally:
             session.commit()
 
-    @staticmethod
-    def observed(time, program, site=None, soft=False):
-        session = get_session()
+    def observed(self, time, program, soft=False):
+        session = self.session()
 
         try:
             prog = session.merge(program[0])
@@ -115,7 +99,7 @@ class Timed(BaseScheduleAlgorithm):
             block = session.merge(program[2])
             block.observed = True
             if not soft:
-                block.last_observation = site.ut().replace(tzinfo=None)
+                block.last_observation = self.site.ut().replace(tzinfo=None)
 
             timed_observation = (
                 session.query(TimedDB)
@@ -134,10 +118,9 @@ class Timed(BaseScheduleAlgorithm):
         finally:
             session.commit()
 
-    @staticmethod
-    def soft_clean(pid, block=None):
+    def soft_clean(self, pid, block=None):
         """Soft clean: only erase information about past observations."""
-        session = get_session()
+        session = self.session()
 
         try:
             timed_observations = session.query(TimedDB).filter(
@@ -150,10 +133,9 @@ class Timed(BaseScheduleAlgorithm):
         finally:
             session.commit()
 
-    @staticmethod
-    def clean(pid):
+    def clean(self, pid):
         """Hard clean: wipe all information from the database."""
-        session = get_session()
+        session = self.session()
 
         try:
             timed_observations = session.query(TimedDB).filter(TimedDB.pid == pid)

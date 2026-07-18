@@ -3,18 +3,19 @@
 
 import datetime as dt
 import importlib
+import math
 from types import SimpleNamespace
 
 import pytest
 
-from chimera_robobs.scheduling import algorithms, model
+from chimera_robobs.scheduling import model
 from chimera_robobs.scheduling.algorithms import (
-    ALGORITHMS,
     ExtinctionMonitor,
     Higher,
     Recurrent,
     Timed,
     TimeSequence,
+    build_algorithms,
 )
 
 from .fakes import FakeSite
@@ -37,11 +38,21 @@ def test_modules_import(module):
 
 def test_ids_and_names_are_stable():
     # the ids/names are stored in the database and must not change
-    assert ALGORITHMS[0] is Higher and Higher.name() == "HIG"
-    assert ALGORITHMS[1] is ExtinctionMonitor and ExtinctionMonitor.name() == "STD"
-    assert ALGORITHMS[2] is Timed and Timed.name() == "TIMED"
-    assert ALGORITHMS[3] is Recurrent and Recurrent.name() == "RECURRENT"
-    assert ALGORITHMS[4] is TimeSequence and TimeSequence.name() == "TIMESEQUENCE"
+    assert (Higher.id, Higher.name) == (0, "HIG")
+    assert (ExtinctionMonitor.id, ExtinctionMonitor.name) == (1, "STD")
+    assert (Timed.id, Timed.name) == (2, "TIMED")
+    assert (Recurrent.id, Recurrent.name) == (3, "RECURRENT")
+    assert (TimeSequence.id, TimeSequence.name) == (4, "TIMESEQUENCE")
+
+
+def test_build_algorithms_registry(tmp_path):
+    factory = model.open_database(str(tmp_path / "robobs.db"))
+    registry = build_algorithms(factory, site=FakeSite())
+    assert sorted(registry) == [0, 1, 2, 3, 4]
+    for algorithm_id, algorithm in registry.items():
+        assert algorithm.id == algorithm_id
+        assert algorithm.session is factory
+        assert isinstance(algorithm.site, FakeSite)
 
 
 def test_higher_next_picks_slew_at_closest_to_now():
@@ -51,17 +62,23 @@ def test_higher_next_picks_slew_at_closest_to_now():
         (SimpleNamespace(slew_at=61000.1), None, None, None),
         (SimpleNamespace(slew_at=61002.0), None, None, None),
     ]
-    chosen = Higher.next(now, programs)
+    higher = Higher(None)
+    chosen = higher.next(now, programs)
     assert chosen is programs[1]
-    assert Higher.next(now, []) is None
-    assert not Higher.timed_constraint()
+    assert higher.next(now, []) is None
+    assert not Higher.timed_constraint
 
 
 @pytest.fixture
 def session_factory(tmp_path):
-    factory = model.open_database(str(tmp_path / "robobs.db"))
-    algorithms.configure(factory)
-    return factory
+    return model.open_database(str(tmp_path / "robobs.db"))
+
+
+@pytest.fixture
+def algorithms(session_factory):
+    return build_algorithms(
+        session_factory, site=FakeSite(lst_rads=10.0 * math.pi / 12.0)
+    )
 
 
 def _make_block(session, pid="P01", sched_algorithm=3):
@@ -91,11 +108,12 @@ def _make_block(session, pid="P01", sched_algorithm=3):
     return program, blockpar, block, target
 
 
-def test_recurrent_add_and_observed_round_trip(session_factory):
+def test_recurrent_add_and_observed_round_trip(session_factory, algorithms):
     session = session_factory()
     program, blockpar, block, target = _make_block(session)
+    recurrent_algorithm = algorithms[3]
 
-    Recurrent.add((block, blockpar, target))
+    recurrent_algorithm.add((block, blockpar, target))
 
     session = session_factory()
     recurrent = session.query(model.RecurrentDB).one()
@@ -107,7 +125,7 @@ def test_recurrent_add_and_observed_round_trip(session_factory):
 
     # mark it observed (hard mode) at a known MJD
     mjd = 61000.0
-    Recurrent.observed(mjd, (program, blockpar, block, target), soft=False)
+    recurrent_algorithm.observed(mjd, (program, blockpar, block, target), soft=False)
 
     session = session_factory()
     recurrent = session.query(model.RecurrentDB).one()
@@ -124,12 +142,14 @@ def test_recurrent_add_and_observed_round_trip(session_factory):
     assert prog.finished is True
 
     # a second observation increments the visit count
-    Recurrent.observed(mjd + 1, (program, blockpar, block, target), soft=False)
+    recurrent_algorithm.observed(
+        mjd + 1, (program, blockpar, block, target), soft=False
+    )
     session = session_factory()
     assert session.query(model.RecurrentDB).one().visits == 2
 
 
-def test_timed_clean_and_soft_clean(session_factory):
+def test_timed_clean_and_soft_clean(session_factory, algorithms):
     session = session_factory()
     for execute_at, finished in ((61000.1, True), (61000.2, False)):
         timed = model.TimedDB(pid="P01", execute_at=execute_at)
@@ -138,7 +158,9 @@ def test_timed_clean_and_soft_clean(session_factory):
     session.add(model.TimedDB(pid="OTHER", execute_at=61000.3))
     session.commit()
 
-    Timed.soft_clean("P01")
+    timed_algorithm = algorithms[2]
+
+    timed_algorithm.soft_clean("P01")
     session = session_factory()
     assert (
         session.query(model.TimedDB)
@@ -148,19 +170,20 @@ def test_timed_clean_and_soft_clean(session_factory):
     )
     assert session.query(model.TimedDB).count() == 3
 
-    Timed.clean("P01")
+    timed_algorithm.clean("P01")
     session = session_factory()
     remaining = session.query(model.TimedDB).all()
     assert len(remaining) == 1
     assert remaining[0].pid == "OTHER"
 
 
-def test_extinction_monitor_add_clean(session_factory):
+def test_extinction_monitor_add_clean(session_factory, algorithms):
     session = session_factory()
     program, blockpar, block, target = _make_block(session, sched_algorithm=1)
+    extmoni = algorithms[1]
 
-    ExtinctionMonitor.add((block, blockpar, target))
-    ExtinctionMonitor.add((block, blockpar, target))
+    extmoni.add((block, blockpar, target))
+    extmoni.add((block, blockpar, target))
 
     session = session_factory()
     info = session.query(model.ExtMoniDB).one()
@@ -169,17 +192,16 @@ def test_extinction_monitor_add_clean(session_factory):
     assert info.nairmass == 2
 
     # observed() records the altitude/airmass of the observation
-    ExtinctionMonitor.site = FakeSite(lst_rads=10.0 * 3.14159265 / 12.0)
-    ExtinctionMonitor.observed(61000.0, (program, blockpar, block, target))
+    extmoni.observed(61000.0, (program, blockpar, block, target))
     session = session_factory()
     info = session.query(model.ExtMoniDB).one()
     assert len(info.observed_am) == 1
     assert info.observed_am[0].altitude == pytest.approx(90.0, abs=1.0)
 
-    ExtinctionMonitor.soft_clean("P01")
+    extmoni.soft_clean("P01")
     session = session_factory()
     assert session.query(model.ObservedAM).count() == 0
 
-    ExtinctionMonitor.clean("P01")
+    extmoni.clean("P01")
     session = session_factory()
     assert session.query(model.ExtMoniDB).count() == 0

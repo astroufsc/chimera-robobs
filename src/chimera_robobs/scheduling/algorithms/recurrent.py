@@ -3,8 +3,9 @@
 
 """Recurrent scheduling algorithm (id 3, name RECURRENT).
 
-Target are only scheduled if they were never observed or if they were
-observed more than a specified number of days in the past.
+Targets are only scheduled if they were never observed or if they were
+observed more than a specified number of days in the past; the selection
+itself uses the :class:`Higher` algorithm.
 """
 
 import datetime
@@ -12,62 +13,45 @@ import logging
 
 from sqlalchemy import and_, or_
 
-from chimera_robobs.scheduling.algorithms.base import (
-    BaseScheduleAlgorithm,
-    RecurrentError,
-    get_session,
-)
+from chimera_robobs.scheduling.algorithms.base import RecurrentError
 from chimera_robobs.scheduling.algorithms.higher import Higher
-from chimera_robobs.scheduling.dates import datetime_from_jd
+from chimera_robobs.scheduling.dates import datetime_from_mjd
 from chimera_robobs.scheduling.model import ObsBlock, RecurrentDB
 
 log = logging.getLogger(__name__)
 
 
-class Recurrent(BaseScheduleAlgorithm):
-    @staticmethod
-    def name() -> str:
-        return "RECURRENT"
+class Recurrent(Higher):
+    id = 3
+    name = "RECURRENT"
+    default_slot_len = 1800.0
+    timed_constraint = True
 
-    @staticmethod
-    def id() -> int:
-        return 3
-
-    @staticmethod
-    def process(*args, **kwargs):
+    def process(
+        self, *, obs_start, obs_end, query, config=None, slot_len=None, today=None
+    ):
         # Try to read the recurrence time from the configuration. If none is
         # provided, raise an exception.
-        if ("config" not in kwargs) or ("recurrence" not in kwargs["config"]):
+        if not config or "recurrence" not in config:
             raise RecurrentError(
                 "No configuration file provided or no recurrence time defined."
             )
 
-        config = kwargs["config"]
-
         recurrence_time = config["recurrence"]
 
-        slot_len = 1800.0
-        if "slotLen" in kwargs:
-            slot_len = kwargs["slotLen"]
-        elif len(args) > 1:
-            try:
-                slot_len = float(args[0])
-            except (TypeError, ValueError):
-                slot_len = 1800.0
-        elif "slotLen" in config:
-            slot_len = config["slotLen"]
-
         # Filter targets by observing date. Leave "NeverObserved" and those
-        # observed more than recurrence_time days ago.
-        today = kwargs["site"].ut().replace(tzinfo=None)
-        if "today" in kwargs:  # Needed for simulations...
-            today = kwargs["today"].replace(tzinfo=None)
+        # observed more than recurrence_time days ago.  ``today`` is only
+        # passed by simulations.
+        if today is None:
+            today = self.site.ut().replace(tzinfo=None)
+        else:
+            today = today.replace(tzinfo=None)
         reference_date = today - datetime.timedelta(days=recurrence_time)
 
-        ntargets = len(kwargs["query"][:])
+        ntargets = query.count()
         # Exclude targets that were observed less than the specified amount
         # of time ago.
-        kwargs["query"] = kwargs["query"].filter(
+        query = query.filter(
             or_(
                 ObsBlock.observed == False,  # noqa: E712
                 and_(
@@ -76,20 +60,18 @@ class Recurrent(BaseScheduleAlgorithm):
                 ),
             )
         )
-        new_ntargets = len(kwargs["query"][:])
-        log.debug("Filtering %i of %i targets", new_ntargets, ntargets)
+        log.debug("Filtering %i of %i targets", query.count(), ntargets)
         # Select targets with the Higher algorithm
-        kwargs.pop("slotLen", None)
-        return Higher.process(slotLen=slot_len, *args, **kwargs)
+        return super().process(
+            obs_start=obs_start,
+            obs_end=obs_end,
+            query=query,
+            config=config,
+            slot_len=slot_len,
+        )
 
-    @staticmethod
-    def next(time, programs):
-        """Select the program to observe with this scheduling algorithm."""
-        return Higher.next(time, programs)
-
-    @staticmethod
-    def add(block):
-        session = get_session()
+    def add(self, block):
+        session = self.session()
         try:
             obsblock = session.merge(block[0])
 
@@ -106,20 +88,20 @@ class Recurrent(BaseScheduleAlgorithm):
 
             if recurrent_block is None:
                 # Not in the database, add it
-                recurrent_block = RecurrentDB()
-                recurrent_block.pid = obsblock.pid
-                recurrent_block.block_id = obsblock.id
-                recurrent_block.target_id = obsblock.target_id
+                recurrent_block = RecurrentDB(
+                    pid=obsblock.pid,
+                    block_id=obsblock.id,
+                    target_id=obsblock.target_id,
+                )
                 session.add(recurrent_block)
         finally:
             session.commit()
 
-    @staticmethod
-    def observed(time, program, site=None, soft=False):
+    def observed(self, time, program, soft=False):
         """Process program as observed."""
-        obstime = datetime_from_jd(time + 2400000.5).replace(tzinfo=None)
+        obstime = datetime_from_mjd(time).replace(tzinfo=None)
 
-        session = get_session()
+        session = self.session()
         try:
             prog = session.merge(program[0])
             prog.finished = True
@@ -142,13 +124,13 @@ class Recurrent(BaseScheduleAlgorithm):
                 )
                 if recurrent_block is None:
                     log.debug("Block not in recurrent database. Adding block...")
-                    recurrent_block = RecurrentDB()
-                    recurrent_block.pid = obsblock.pid
-                    # legacy bug: a trailing comma stored a tuple here
-                    recurrent_block.block_id = obsblock.id
-                    recurrent_block.target_id = obsblock.target_id
-                    recurrent_block.visits = 1
-                    recurrent_block.last_visit = obstime
+                    recurrent_block = RecurrentDB(
+                        pid=obsblock.pid,
+                        block_id=obsblock.id,
+                        target_id=obsblock.target_id,
+                        visits=1,
+                        last_visit=obstime,
+                    )
                     session.add(recurrent_block)
                 else:
                     recurrent_block.visits += 1

@@ -44,10 +44,12 @@ from chimera.util.coord import Coord
 from chimera.util.position import Position
 from sqlalchemy import and_, desc, or_
 
-from chimera_robobs.scheduling import algorithms
-from chimera_robobs.scheduling.algorithms import ALGORITHMS
+from chimera_robobs.scheduling.algorithms import build_algorithms
 from chimera_robobs.scheduling.dates import (
+    MJD_JD_OFFSET,
+    SECONDS_PER_DAY,
     datetime_from_jd,
+    datetime_from_mjd,
     jd_from_datetime,
 )
 from chimera_robobs.scheduling.engine import RobObsEngine
@@ -64,6 +66,7 @@ from chimera_robobs.scheduling.model import (
     Program,
     Project,
     Target,
+    block_duration,
     open_database,
 )
 from chimera_robobs.scheduling.siteadapter import SiteAdapter
@@ -124,9 +127,7 @@ def _database_path(args) -> str:
 
 
 def _session_factory(args):
-    factory = open_database(args.database)
-    algorithms.configure(factory)
-    return factory
+    return open_database(args.database)
 
 
 def backup_database(args) -> None:
@@ -503,19 +504,10 @@ def _make_action(actconfig, target, block, with_offsets) -> object:
     return act
 
 
-def _action_length(act) -> float:
-    """Estimated duration of an action in seconds.
-
-    The legacy tool accumulated the exposure time once per configuration key
-    (an indentation bug that inflated block lengths); this counts each action
-    once.  Read-out (12 s) and focus (600 s) overheads are kept hard-coded as
-    in the legacy tool.
-    """
-    if isinstance(act, Expose):
-        return (float(act.exptime or 0.0) + 12.0) * int(act.frames or 1)
-    if isinstance(act, AutoFocus) and (act.step or 0) > 0:
-        return 600.0
-    return 0.0
+#: read-out and focus-sweep overheads (seconds) used for the stored block
+#: length, hard-coded as in the legacy tool
+INGEST_READOUT_OVERHEAD = 12.0
+INGEST_AUTOFOCUS_OVERHEAD = 600.0
 
 
 def add_observing_block(session, row, config) -> ObsBlock | None:
@@ -566,8 +558,6 @@ def add_observing_block(session, row, config) -> ObsBlock | None:
         block_par_id=blockpar.id,
     )
 
-    block_length = 0.0
-
     # process pre-slew actions
     for actconfig in config.get("pre-actions", []):
         act = _make_action(actconfig, target, addblock, with_offsets=False)
@@ -581,12 +571,18 @@ def add_observing_block(session, row, config) -> ObsBlock | None:
     _out(f"Slew to: {target.name} ({slewto})")
 
     # process post-slew actions
+    post_actions = []
     for actconfig in config.get("pos-actions", []):
         act = _make_action(actconfig, target, addblock, with_offsets=True)
-        block_length += _action_length(act)
+        post_actions.append(act)
         addblock.actions.append(act)
 
-    addblock.length = block_length
+    # only post-slew actions count towards the stored block length
+    addblock.length = block_duration(
+        post_actions,
+        readout=INGEST_READOUT_OVERHEAD,
+        autofocus_sweep=INGEST_AUTOFOCUS_OVERHEAD,
+    )
     session.add(addblock)
     session.commit()
     return addblock
@@ -761,7 +757,7 @@ def cmd_clean_queue(args) -> int:
     for block in sched_blocks:
         block.scheduled = False
 
-    for sched in ALGORITHMS.values():
+    for sched in build_algorithms(factory).values():
         sched.clean(args.pid)
 
     session.commit()
@@ -830,20 +826,21 @@ def select_blocks(session, pid: str, lst_start: float, lst_end: float):
     return query.order_by(desc(Target.target_ah))
 
 
-def add_observation(session, block_rows, obstime_jd: float) -> None:
+def add_observation(session, algorithms, block_rows, obstime_jd: float) -> None:
     """Create queue programs for every ``(ObsBlock, BlockPar, Target)`` row."""
     programs = []
 
     for subblock in block_rows:
         obs_block, blockpar, target = subblock
         project = session.query(Project).filter(Project.pid == obs_block.pid).first()
-        _out(f"\t @{obstime_jd - 2400000.5:.3f} - {target}")
+        slew_at = obstime_jd - MJD_JD_OFFSET
+        _out(f"\t @{slew_at:.3f} - {target}")
         program = Program(
             target_id=obs_block.target_id,
             name=target.name,
             pi="",
             priority=project.priority,
-            slew_at=obstime_jd - 2400000.5,
+            slew_at=slew_at,
             pid=obs_block.pid,
             project_id=project.id,
             obsblock_id=obs_block.id,
@@ -851,7 +848,7 @@ def add_observation(session, block_rows, obstime_jd: float) -> None:
         )
         programs.append(program)
 
-        ALGORITHMS[blockpar.sched_algorithm].add(subblock)
+        algorithms[blockpar.sched_algorithm].add(subblock)
 
     session.add_all(programs)
     session.commit()
@@ -920,23 +917,22 @@ def cmd_make_queue(args) -> int:
         for row in tlist:
             _out(f" - {row[2]}")
 
-        sched_alg_list = np.array([t[1].sched_algorithm for t in tlist])
-        unique_algorithms = np.unique(sched_alg_list)
+        unique_algorithm_ids = sorted({t[1].sched_algorithm for t in tlist})
 
-        _out(f"-Found {len(unique_algorithms)} types of scheduling algorithms...")
-        for i, sa_type in enumerate(unique_algorithms):
+        _out(f"-Found {len(unique_algorithm_ids)} types of scheduling algorithms...")
+        for i, sa_type in enumerate(unique_algorithm_ids):
             _out(f"--SA Type[{i + 1}] = {sa_type}")
 
-        for sal in unique_algorithms:
+        algorithms = build_algorithms(factory, site)
+        for sal in unique_algorithm_ids:
             nquery = tlist.filter(BlockPar.sched_algorithm == sal)
 
-            sched = ALGORITHMS[sal]
+            sched = algorithms[sal]
 
             obs_targets = sched.process(
-                obsStart=obs_start,
-                obsEnd=obs_end,
+                obs_start=obs_start,
+                obs_end=obs_end,
                 query=nquery,
-                site=site,
                 config=pgrconfig,
             )
 
@@ -944,7 +940,7 @@ def cmd_make_queue(args) -> int:
             for slot in obs_targets:
                 if slot["blockid"] > 0:
                     oblock = nquery.filter(ObsBlock.blockid == int(slot["blockid"]))
-                    add_observation(session, oblock, float(slot["start"]))
+                    add_observation(session, algorithms, oblock, float(slot["start"]))
 
             # ...then mark as scheduled.
             for slot in obs_targets:
@@ -962,18 +958,16 @@ def cmd_make_queue(args) -> int:
 
 def calc_obs_time(session, program, readout_time: float = 0.0) -> float:
     """Estimated duration (seconds) of a program's observing block."""
-    otime = 0.0
     obs_block = (
         session.query(ObsBlock).filter(ObsBlock.id == program.obsblock_id).first()
     )
     if obs_block is None:
-        return otime
-    for act in obs_block.actions:
-        if act.__tablename__ == "action_expose":
-            otime += (act.exptime + readout_time) * act.frames
-        elif act.__tablename__ == "action_focus" and act.step > 0:
-            otime += 600.0
-    return otime
+        return 0.0
+    return block_duration(
+        obs_block.actions,
+        readout=readout_time,
+        autofocus_sweep=INGEST_AUTOFOCUS_OVERHEAD,
+    )
 
 
 def cmd_process_queue(args) -> int:
@@ -986,10 +980,11 @@ def cmd_process_queue(args) -> int:
     try:
         site = SiteAdapter(site_proxy)
         times = make_times(args, site)
-        obs_start = times.jd_start - 2400000.5
-        obs_end = times.jd_end - 2400000.5
+        obs_start = times.jd_start - MJD_JD_OFFSET
+        obs_end = times.jd_end - MJD_JD_OFFSET
 
-        engine = RobObsEngine(factory, site, log=log)
+        algorithms = build_algorithms(factory, site)
+        engine = RobObsEngine(factory, site, log=log, algorithms=algorithms)
 
         otime = obs_start
         app_open = 0.0
@@ -1032,7 +1027,7 @@ def cmd_process_queue(args) -> int:
             if tel_pos:
                 adist = tel_pos.angsep(target_pos)
                 # consider 1 arcmin / second
-                slewtime = float(adist.to_as()) / 60.0 / 60.0 / 86.4e3
+                slewtime = float(adist.to_as()) / 60.0 / 60.0 / SECONDS_PER_DAY
             # if slewtime larger than idle time, slewtime will be zero
             slewtime = slewtime if slewtime > _idle else 0
             msg += " | slewtime = %.5fm" % (slewtime * 60.0 * 60.0)
@@ -1042,7 +1037,7 @@ def cmd_process_queue(args) -> int:
             )
             session.add(
                 ObservingLog(
-                    time=datetime_from_jd(stime + 2400000.5).replace(tzinfo=None),
+                    time=datetime_from_mjd(stime).replace(tzinfo=None),
                     target_id=program.target_id,
                     name=program.name,
                     priority=program.priority,
@@ -1053,7 +1048,7 @@ def cmd_process_queue(args) -> int:
 
             session.add(
                 ObservingLog(
-                    time=datetime_from_jd(stime + aplen / 86.4e3 + 2400000.5).replace(
+                    time=datetime_from_mjd(stime + aplen / SECONDS_PER_DAY).replace(
                         tzinfo=None
                     ),
                     target_id=program.target_id,
@@ -1063,7 +1058,7 @@ def cmd_process_queue(args) -> int:
                 )
             )
 
-            otime += (aplen / 86.4e3) + slewtime + _idle
+            otime += (aplen / SECONDS_PER_DAY) + slewtime + _idle
 
             app_open += aplen
             program.finished = True
@@ -1072,11 +1067,11 @@ def cmd_process_queue(args) -> int:
             blockpar = session.merge(program_list[1])
             _out(
                 f"{blockpar}: {blockpar.sched_algorithm} "
-                f"{ALGORITHMS[blockpar.sched_algorithm].name()}"
+                f"{algorithms[blockpar.sched_algorithm].name}"
             )
 
-            ALGORITHMS[blockpar.sched_algorithm].observed(
-                otime, program_list, site=site, soft=True
+            algorithms[blockpar.sched_algorithm].observed(
+                otime, program_list, soft=True
             )
             tel_pos = target_pos
             session.commit()
@@ -1088,7 +1083,7 @@ def cmd_process_queue(args) -> int:
         allpid = [p.pid for p in session.query(Project)]
 
         session.commit()
-        for sched in ALGORITHMS.values():
+        for sched in algorithms.values():
             for pid in allpid:
                 sched.soft_clean(pid)
 

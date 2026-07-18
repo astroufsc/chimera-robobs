@@ -1,7 +1,11 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 # SPDX-FileCopyrightText: 2014-present chimera-robobs authors
 
-"""'Higher in the sky' scheduling algorithm (id 0, name HIG)."""
+"""'Higher in the sky' scheduling algorithm (id 0, name HIG).
+
+Also hosts the slot-allocation loop shared with :class:`TimeSequence`
+(which subclasses :class:`Higher` and only flips two behavior flags).
+"""
 
 import logging
 from multiprocessing.pool import ThreadPool
@@ -11,9 +15,9 @@ from chimera.util.position import Position
 
 from chimera_robobs.scheduling.algorithms.base import (
     BaseScheduleAlgorithm,
-    get_session,
+    airmass,
 )
-from chimera_robobs.scheduling.dates import datetime_from_jd
+from chimera_robobs.scheduling.dates import SECONDS_PER_DAY, datetime_from_jd
 from chimera_robobs.scheduling.model import ObsBlock
 
 log = logging.getLogger(__name__)
@@ -26,57 +30,47 @@ SLOT_DTYPE = [
     ("blockid", int),
 ]
 
+#: dtype of the per-block moon/length parameters used by the allocation loop
+MOON_PAR_DTYPE = [
+    ("min_moon_distance", float),
+    ("min_moon_bright", float),
+    ("max_moon_bright", float),
+    ("length", float),
+]
+
 
 class Higher(BaseScheduleAlgorithm):
-    @staticmethod
-    def name() -> str:
-        return "HIG"
+    id = 0
+    name = "HIG"
+    default_slot_len = 60.0
+    timed_constraint = False
 
-    @staticmethod
-    def id() -> int:
-        return 0
+    #: keep the selected target as a candidate for later slots
+    #: (TimeSequence flips this to build monitoring sequences)
+    keep_selected_target = False
+    #: also require the end-of-slot airmass/altitude to be in range
+    check_end_airmass = True
 
-    @staticmethod
-    def process(*args, **kwargs):
-        slot_len = 60.0
-        if "slotLen" in kwargs:
-            slot_len = kwargs["slotLen"]
-        elif len(args) > 1:
-            try:
-                slot_len = float(args[0])
-            except (TypeError, ValueError):
-                slot_len = 60.0
-
-        pool_size = 1
-        max_sched_blocks = -1
-        if "config" in kwargs:
-            config = kwargs["config"]
-            if "pool_size" in config:
-                pool_size = config["pool_size"]
-            if "slotLen" in config:
-                slot_len = config["slotLen"]
-            if "max_sched_blocks" in config:
-                max_sched_blocks = config["max_sched_blocks"]
-
-        nightstart = kwargs["obsStart"]
-        nightend = kwargs["obsEnd"]
-        site = kwargs["site"]
+    def process(self, *, obs_start, obs_end, query, config=None, slot_len=None):
+        config = config or {}
+        slot_len = self._slot_len(config, slot_len)
+        pool_size = int(config.get("pool_size", 1))
+        max_sched_blocks = int(config.get("max_sched_blocks", -1))
+        site = self.site
 
         # Create observation slots.
-        obs_slots = np.array(
-            np.arange(nightstart, nightend, slot_len / 60.0 / 60.0 / 24.0),
-            dtype=SLOT_DTYPE,
-        )
+        slot_len_days = slot_len / SECONDS_PER_DAY
+        starts = np.arange(obs_start, obs_end, slot_len_days)
+        obs_slots = np.zeros(len(starts), dtype=SLOT_DTYPE)
+        obs_slots["start"] = starts
+        obs_slots["end"] = starts + slot_len_days
+        obs_slots["slotid"] = np.arange(len(starts))
+        obs_slots["blockid"] = -1
 
         log.debug("Creating %i observing slots", len(obs_slots))
 
-        obs_slots["end"] += slot_len / 60.0 / 60.0 / 24.0
-        obs_slots["slotid"] = np.arange(len(obs_slots))
-        obs_slots["blockid"] = np.zeros(len(obs_slots)) - 1
-
         # For each slot select the highest in the sky...
-        targets = kwargs["query"]
-        rows = targets[:]
+        rows = query[:]
 
         radec_array = np.array(
             [Position.from_ra_dec(rows[0][2].target_ra, rows[0][2].target_dec)]
@@ -92,12 +86,7 @@ class Higher(BaseScheduleAlgorithm):
                 )
                 for row in rows
             ],
-            dtype=[
-                ("minmoonDist", float),
-                ("minmoonBright", float),
-                ("maxmoonBright", float),
-                ("length", float),
-            ],
+            dtype=MOON_PAR_DTYPE,
         )
 
         radec_pos = np.array([0])
@@ -113,7 +102,6 @@ class Higher(BaseScheduleAlgorithm):
                 blockid = row[0].blockid
                 radec_pos = np.append(radec_pos, itr)
 
-        mask = np.zeros(len(radec_array)) == 0
         nblocks_scheduled = 0
 
         for itr in range(len(obs_slots)):
@@ -140,9 +128,9 @@ class Higher(BaseScheduleAlgorithm):
 
             if (
                 not (
-                    moon_par["minmoonBright"].max()
+                    moon_par["min_moon_bright"].max()
                     < moon_brightness
-                    < moon_par["maxmoonBright"].min()
+                    < moon_par["max_moon_bright"].min()
                 )
             ) and (moon_alt > 0.0):
                 log.warning(
@@ -150,8 +138,8 @@ class Higher(BaseScheduleAlgorithm):
                     "(%5.1f%% -> %5.1f%%). Moon alt. = %6.2f. Skipping this slot...",
                     itr + 1,
                     moon_brightness,
-                    moon_par["minmoonBright"].max(),
-                    moon_par["maxmoonBright"].min(),
+                    moon_par["min_moon_bright"].max(),
+                    moon_par["max_moon_bright"].min(),
                     moon_alt,
                 )
                 continue
@@ -165,9 +153,9 @@ class Higher(BaseScheduleAlgorithm):
                     ("altitude", float),
                     ("start_altitude", float),
                     ("end_altitude", float),
-                    ("moonD", float),
-                    ("minmoonD", float),
-                    ("mask_moonBright", bool),
+                    ("moon_distance", float),
+                    ("min_moon_distance", float),
+                    ("moon_bright_ok", bool),
                 ],
             )
 
@@ -183,11 +171,11 @@ class Higher(BaseScheduleAlgorithm):
                         site.ra_dec_to_alt_az(ra_h, dec_d, lst)[0],
                         site.ra_dec_to_alt_az(ra_h, dec_d, lst + time_offset)[0],
                         float(radec_array[index].angsep(moon_ra_dec)),
-                        moon_par["minmoonDist"][index],
+                        moon_par["min_moon_distance"][index],
                         (
-                            moon_par["minmoonBright"][index]
+                            moon_par["min_moon_bright"][index]
                             < moon_brightness
-                            < moon_par["maxmoonBright"][index]
+                            < moon_par["max_moon_bright"][index]
                         )
                         or (moon_alt < 0.0),
                     )
@@ -205,15 +193,14 @@ class Higher(BaseScheduleAlgorithm):
 
             # Create moon mask
             moon_mask = np.bitwise_and(
-                target_par["moonD"] > target_par["minmoonD"],
-                target_par["mask_moonBright"],
+                target_par["moon_distance"] > target_par["min_moon_distance"],
+                target_par["moon_bright_ok"],
             )
 
-            mapping = np.arange(len(mask))[moon_mask]
-            tmp_radec_array = np.array(radec_array[moon_mask], copy=True)
-            tmp_radec_pos = np.array(radec_pos[moon_mask], copy=True)
+            mapping = np.arange(len(radec_array))[moon_mask]
+            masked_radec_pos = radec_pos[moon_mask]
 
-            if len(tmp_radec_array) == 0:
+            if len(masked_radec_pos) == 0:
                 log.warning("Slot[%03i]: Could not find suitable target", itr + 1)
                 continue
 
@@ -223,19 +210,18 @@ class Higher(BaseScheduleAlgorithm):
             start_alt = target_par["start_altitude"][moon_mask][stg]
             end_alt = target_par["end_altitude"][moon_mask][stg]
 
-            # Check airmass
-            slot_airmass = 1.0 / np.cos(np.pi / 2.0 - alt[stg] * np.pi / 180.0)
-            start_airmass = 1.0 / np.cos(np.pi / 2.0 - start_alt * np.pi / 180.0)
-            end_airmass = 1.0 / np.cos(np.pi / 2.0 - end_alt * np.pi / 180.0)
+            # Check airmass.  Legacy quirk (preserved): max_airmass is looked
+            # up with the *unmasked* index.
+            slot_airmass = airmass(alt[stg])
+            start_airmass = airmass(start_alt)
+            end_airmass = airmass(end_alt)
             max_airmass = rows[radec_pos[stg]][1].max_airmass
             # Since this is the highest at this time, it doesn't make sense
             # to iterate over it.
-            if (
-                start_airmass > max_airmass
-                or end_airmass > max_airmass
-                or slot_airmass < 0.0
-                or start_alt < 0.0
-            ):
+            too_low = start_airmass > max_airmass or slot_airmass >= 999.0
+            if self.check_end_airmass:
+                too_low = too_low or end_airmass > max_airmass or start_alt < 0.0
+            if too_low:
                 log.info(
                     "Object too low in the sky, (Alt.=%6.2f) airmass = "
                     "%5.2f/%5.2f/%5.2f (max = %5.2f)... Skipping this slot..",
@@ -247,7 +233,7 @@ class Higher(BaseScheduleAlgorithm):
                 )
                 continue
 
-            s_target = rows[tmp_radec_pos[stg]]
+            s_target = rows[masked_radec_pos[stg]]
 
             log.info(
                 "Slot[%03i] @%.3f: %s %s (Alt.=%6.2f, airmass=%5.2f (max=%5.2f))",
@@ -255,16 +241,18 @@ class Higher(BaseScheduleAlgorithm):
                 obs_slots["start"][itr],
                 s_target[0],
                 s_target[2],
-                start_alt,
+                alt[stg],
                 slot_airmass,
                 s_target[1].max_airmass,
             )
 
-            mask[mapping[stg]] = False
-            radec_array = radec_array[mask]
-            radec_pos = radec_pos[mask]
-            moon_par = moon_par[mask]
-            mask = mask[mask]
+            if not self.keep_selected_target:
+                keep = np.ones(len(radec_array), dtype=bool)
+                keep[mapping[stg]] = False
+                radec_array = radec_array[keep]
+                radec_pos = radec_pos[keep]
+                moon_par = moon_par[keep]
+
             obs_slots["blockid"][itr] = s_target[0].blockid
             nblocks_scheduled += 1
             if 0 < max_sched_blocks <= nblocks_scheduled:
@@ -275,7 +263,7 @@ class Higher(BaseScheduleAlgorithm):
                 break
 
             # Check if this block has more targets...
-            sec_targets = targets.filter(
+            sec_targets = query.filter(
                 ObsBlock.blockid == s_target[0].blockid,
                 ObsBlock.target_id != s_target[0].target_id,
             )
@@ -283,24 +271,22 @@ class Higher(BaseScheduleAlgorithm):
             if sec_targets.count() > 0:
                 log.debug("Secondary targets not implemented yet...")
 
-            if len(mask) == 0:
+            if len(radec_array) == 0:
                 break
 
         return obs_slots
 
-    @staticmethod
-    def next(time, programs):
+    def next(self, now_mjd, programs):
         programs = programs[:]
         if len(programs) == 0:
             return None
-        dt = np.array([np.abs(time - program[0].slew_at) for program in programs])
+        dt = np.array([np.abs(now_mjd - program[0].slew_at) for program in programs])
         iprog = np.argmin(dt)
         return programs[iprog]
 
-    @staticmethod
-    def observed(time, program, site=None, soft=False):
+    def observed(self, time, program, soft=False):
         """Process program as observed."""
-        session = get_session()
+        session = self.session()
         try:
             prog = session.merge(program[0])
             prog.finished = True
@@ -308,10 +294,6 @@ class Higher(BaseScheduleAlgorithm):
             obsblock.observed = True
             if not soft:
                 obsblock.completed = True
-                obsblock.last_observation = site.ut().replace(tzinfo=None)
+                obsblock.last_observation = self.site.ut().replace(tzinfo=None)
         finally:
             session.commit()
-
-    @staticmethod
-    def timed_constraint() -> bool:
-        return False
