@@ -371,3 +371,54 @@ def test_project_scheduling_times_with_yaml_timestamps(db, tmp_path):
     stored = json.loads(session.query(model.Project).one().scheduling)
     assert stored["times"][0] == {"target": "Occ1_123", "at": "2026-07-25T03:12:00"}
     assert stored["times"][1] == "2026-07-26T02:00:00"
+
+
+def test_skyflat_calibration_project_round_trip(db, tmp_path):
+    """A skyflat project ingests with autoflat blocks: no auto-slew Point
+    (the sky-flat controller points itself), block length from the
+    per-frame autoflat budget, and the skyflat scheduling keys accepted."""
+    proj = tmp_path / "cal_proj.yaml"
+    proj.write_text(
+        "project:\n"
+        "  pid: CAL\n"
+        "  pi: Calibration\n"
+        "  abstract: sky flats\n"
+        "  url: none\n"
+        "  priority: 0\n"
+        "observing_blocks:\n"
+        "  flats:\n"
+        "    name: CAL\n"
+        "    max_airmass: 100\n"
+        "    min_airmass: -1\n"
+        "    max_moon_bright: 100.0\n"
+        "    min_moon_bright: 0.0\n"
+        "    min_moon_distance: -1\n"
+        "    max_seeing: 100.0\n"
+        "    cloud_cover: 1.0\n"
+        "    scheduling_algorithm: skyflat\n"
+        "    apply_ext_corr: false\n"
+        "scheduling:\n"
+        "  flat_window: both\n"
+        "  n_filters:\n"
+        "    evening: 2\n"
+        "    morning: 1\n"
+        "  lookback: 15\n"
+    )
+    targets = tmp_path / "cal_targets.csv"
+    targets.write_text("PID,NAME,RA,DEC,EPOCH\nCAL,SKYFLAT,00:00:00,-22:32:04,2000.\n")
+    blockcfg = tmp_path / "cal_block.yaml"
+    blockcfg.write_text("post_actions:\n- action: autoflat\n  filter: R\n  frames: 9\n")
+    assert _run(db, "add-project", "-f", str(proj)) == 0
+    assert _run(db, "add-targets", "-f", str(targets)) == 0
+
+    session = _session(db)
+    target_id = session.query(model.Target).one().id
+    blist = tmp_path / "cal_blocks.list"
+    blist.write_text(f"CAL 1 {target_id} {blockcfg} 0\n")
+    assert _run(db, "add-observing-block", "-f", str(blist)) == 0
+
+    session = _session(db)
+    block = session.query(model.ObsBlock).one()
+    # no Point action prepended, only the autoflat itself
+    assert [type(a).__name__ for a in block.actions] == ["AutoFlat"]
+    assert block.length == pytest.approx(9 * 60.0)  # per-frame budget

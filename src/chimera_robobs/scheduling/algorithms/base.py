@@ -41,7 +41,7 @@ class BaseScheduleAlgorithm:
     The :attr:`id`/:attr:`name` values are stored in the database
     (``blockpar.sched_algorithm``) and must not change:
     0 Higher/HIG, 1 ExtinctionMonitor/STD, 2 Timed/TIMED,
-    3 Recurrent/RECURRENT, 4 TimeSequence/TIMESEQUENCE.
+    3 Recurrent/RECURRENT, 4 TimeSequence/TIMESEQUENCE, 5 SkyFlat/SKYFLAT.
     """
 
     id: int = -1
@@ -54,6 +54,12 @@ class BaseScheduleAlgorithm:
     #: whether the program's ``slew_at`` is a hard constraint (the engine
     #: only searches for an earlier feasible start when this is False)
     timed_constraint: bool = True
+
+    #: twilight-calibration programs (sky flats) run outside the -18 deg
+    #: night window on a placeholder target: the engine skips its night /
+    #: airmass / moon checks for them (the sky-flat controller enforces its
+    #: own sun-altitude window)
+    twilight_calibration: bool = False
 
     def __init__(self, session_factory: sessionmaker, site=None):
         self.session = session_factory

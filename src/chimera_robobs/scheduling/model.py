@@ -148,6 +148,29 @@ class TimedDB(Base):
         return f"[timed:{self.pid}] execute@: {self.execute_at:.3f} [{status}]"
 
 
+class SkyFlatDB(Base):
+    """Ledger of sky flats actually taken, per filter.
+
+    Written by the skyflat algorithm's ``observed()`` (production only —
+    the offline simulation passes ``soft=True`` and leaves it alone) and
+    read back at make-queue time to pick the filters most in need of
+    flats.  The t80s crontab got this from the reduction pipeline's QC
+    database; here the robobs database itself is the record.
+    """
+
+    __tablename__ = "skyflatdb"
+
+    id = Column(Integer, primary_key=True)
+
+    pid = Column(String)  # project code
+    filter = Column(String)
+    frames = Column(Integer, default=0)
+    observed_at = Column(DateTime, default=None)
+
+    def __str__(self):
+        return f"[skyflat:{self.pid}] {self.filter} x{self.frames} @ {self.observed_at}"
+
+
 class RecurrentDB(Base):
     """Bookkeeping for the recurrent scheduling algorithm."""
 
@@ -559,15 +582,19 @@ def block_duration(
     readout: float = 0.0,
     autofocus_sweep: float = 0.0,
     autofocus_set: float = 0.0,
+    autoflat_frame: float = 0.0,
 ) -> float:
     """Estimated duration in seconds of a sequence of block actions.
 
-    Only exposures and autofocus runs contribute; the overhead constants
-    differ per caller (engine program length: no overheads; CLI block
-    ingest: 12 s readout + 600 s focus sweep; offline simulation: 20 s
-    readout; extinction monitor: config-driven), so they are parameters.
-    ``AutoFocus.step > 0`` is a focus sweep; ``step == 0`` is the "set
-    focuser position" sentinel used at T80S; ``step < 0`` takes no time.
+    Only exposures, autofocus runs and autoflats contribute; the overhead
+    constants differ per caller (engine program length: no overheads; CLI
+    block ingest: 12 s readout + 600 s focus sweep; offline simulation:
+    20 s readout; extinction monitor: config-driven), so they are
+    parameters.  ``AutoFocus.step > 0`` is a focus sweep; ``step == 0`` is
+    the "set focuser position" sentinel used at T80S; ``step < 0`` takes no
+    time.  ``autoflat_frame`` is the per-frame budget of an autoflat (the
+    sky-flat controller decides the exposure time itself, waiting for the
+    right sky level between frames).
     """
     total = 0.0
     for act in actions:
@@ -579,4 +606,6 @@ def block_duration(
                 total += autofocus_sweep
             elif step == 0:
                 total += autofocus_set
+        elif isinstance(act, AutoFlat):
+            total += autoflat_frame * int(act.frames or 1)
     return total

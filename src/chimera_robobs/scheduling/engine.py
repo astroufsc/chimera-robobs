@@ -297,6 +297,14 @@ class RobObsEngine:
             target = session.merge(program[3])
             blockpar = session.merge(program[1])
 
+            if self.algorithms[blockpar.sched_algorithm].twilight_calibration:
+                # sky flats: run outside the -18 deg night window on a
+                # placeholder target — none of the night/airmass/moon
+                # checks apply.  The sky-flat controller gates on its own
+                # sun-altitude window (sun_alt_hi/sun_alt_low).
+                self.log.debug("Twilight calibration program: conditions waived.")
+                return True
+
             date_time = datetime_from_mjd(time)
             lst = self.site.lst_in_rads(date_time)  # in radians
 

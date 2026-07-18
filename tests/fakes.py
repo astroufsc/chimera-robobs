@@ -78,6 +78,15 @@ class FakeSite:
             return date + dt.timedelta(hours=13)
         return date + dt.timedelta(hours=self._night_length)
 
+    def sunset(self, date=None) -> dt.datetime:
+        # next-event semantics like the real Site: queried from 6 h before
+        # dusk (as the skyflat algorithm does), the sunset lands 1.3 h
+        # before it
+        return self._parse(date) + dt.timedelta(hours=4.7)
+
+    def sunrise(self, date=None) -> dt.datetime:
+        return self._parse(date) + dt.timedelta(hours=1.0)
+
     def ra_dec_to_alt_az(self, ra_hours, dec_deg, lst_in_rads) -> tuple[float, float]:
         return Position.ra_dec_to_alt_az(
             float(ra_hours), float(dec_deg), self.latitude, float(lst_in_rads)

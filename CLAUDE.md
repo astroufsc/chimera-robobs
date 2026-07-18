@@ -12,7 +12,7 @@ cookiecutter and the chimera-supervisor 2.0 house style.
 - Keep the project structure compatible with the chimera-template so
   template updates can be applied.
 - The algorithm ids/names stored in `blockpar.sched_algorithm` (0 HIG,
-  1 STD, 2 TIMED, 3 RECURRENT, 4 TIMESEQUENCE) and the canonical
+  1 STD, 2 TIMED, 3 RECURRENT, 4 TIMESEQUENCE, 5 SKYFLAT) and the canonical
   snake_case input dialect (`scheduling_algorithm: recurrent`,
   `pre_actions`/`post_actions`, `slot_len`) are compatibility surfaces —
   never change them.  Legacy-dialect files are converted once with

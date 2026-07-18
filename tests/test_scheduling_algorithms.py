@@ -13,6 +13,7 @@ from chimera_robobs.scheduling.algorithms import (
     ExtinctionMonitor,
     Higher,
     Recurrent,
+    SkyFlat,
     Timed,
     TimeSequence,
     build_algorithms,
@@ -43,12 +44,13 @@ def test_ids_and_names_are_stable():
     assert (Timed.id, Timed.name) == (2, "TIMED")
     assert (Recurrent.id, Recurrent.name) == (3, "RECURRENT")
     assert (TimeSequence.id, TimeSequence.name) == (4, "TIMESEQUENCE")
+    assert (SkyFlat.id, SkyFlat.name) == (5, "SKYFLAT")
 
 
 def test_build_algorithms_registry(tmp_path):
     factory = model.open_database(str(tmp_path / "robobs.db"))
     registry = build_algorithms(factory, site=FakeSite())
-    assert sorted(registry) == [0, 1, 2, 3, 4]
+    assert sorted(registry) == [0, 1, 2, 3, 4, 5]
     for algorithm_id, algorithm in registry.items():
         assert algorithm.id == algorithm_id
         assert algorithm.session is factory

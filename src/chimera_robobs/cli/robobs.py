@@ -53,6 +53,7 @@ from chimera_robobs.scheduling.algorithms import (
     build_algorithms,
     parse_algorithm_id,
 )
+from chimera_robobs.scheduling.algorithms.skyflat import SkyFlat
 from chimera_robobs.scheduling.dates import (
     MJD_JD_OFFSET,
     SECONDS_PER_DAY,
@@ -120,6 +121,9 @@ PID_CONFIG_KEYS = {
     "times",
     "past_meridian_only",
     "expire_overdue",
+    "flat_window",
+    "n_filters",
+    "lookback",
 }
 
 #: legacy CSV column names -> Target columns.  The production pointing CSVs
@@ -542,6 +546,9 @@ def _make_action(actconfig, target, block, with_offsets) -> object:
 #: length, hard-coded as in the legacy tool
 INGEST_READOUT_OVERHEAD = 12.0
 INGEST_AUTOFOCUS_OVERHEAD = 600.0
+#: per-frame budget of an autoflat action: the sky-flat controller decides
+#: the exposure itself and waits for the right sky level between frames
+INGEST_AUTOFLAT_FRAME_OVERHEAD = 60.0
 
 
 def add_observing_block(session, row, config) -> ObsBlock | None:
@@ -603,12 +610,17 @@ def add_observing_block(session, row, config) -> ObsBlock | None:
         act = _make_action(actconfig, target, addblock, with_offsets=False)
         addblock.actions.append(act)
 
-    # slew to target
-    position = Position.from_ra_dec(target.target_ra, target.target_dec, "J2000")
-    slewto = Point()
-    slewto.target_ra_dec = position
-    addblock.actions.append(slewto)
-    _out(f"Slew to: {target.name} ({slewto})")
+    # slew to target — except for sky-flat blocks: the sky-flat controller
+    # does its own (anti-solar) pointing, and slewing to the placeholder
+    # target around sunset could aim near the sun
+    if blockpar.sched_algorithm == SkyFlat.id:
+        _out(f"No slew action: {target.name} is a sky-flat placeholder.")
+    else:
+        position = Position.from_ra_dec(target.target_ra, target.target_dec, "J2000")
+        slewto = Point()
+        slewto.target_ra_dec = position
+        addblock.actions.append(slewto)
+        _out(f"Slew to: {target.name} ({slewto})")
 
     # process post-slew actions
     post_actions = []
@@ -622,6 +634,7 @@ def add_observing_block(session, row, config) -> ObsBlock | None:
         post_actions,
         readout=INGEST_READOUT_OVERHEAD,
         autofocus_sweep=INGEST_AUTOFOCUS_OVERHEAD,
+        autoflat_frame=INGEST_AUTOFLAT_FRAME_OVERHEAD,
     )
     session.add(addblock)
     session.commit()
@@ -1038,11 +1051,19 @@ def select_blocks(session, pid: str, lst_start: float, lst_end: float):
             ObsBlock.completed == False,  # noqa: E712
         )
     )
+    # sky-flat blocks point at a placeholder target: exempt from the LST cut
+    all_sky = BlockPar.sched_algorithm == SkyFlat.id
     if lst_start < lst_end:
-        query = query.filter(Target.target_ra > lst_start, Target.target_ra < lst_end)
+        query = query.filter(
+            or_(
+                all_sky,
+                and_(Target.target_ra > lst_start, Target.target_ra < lst_end),
+            )
+        )
     else:
         query = query.filter(
             or_(
+                all_sky,
                 and_(Target.target_ra > lst_start, Target.target_ra < 24.0),
                 # >= so targets at exactly RA 0 are selectable (2018 fix from
                 # the never-merged wschoenell-patch-1 branch)
@@ -1200,6 +1221,7 @@ def calc_obs_time(session, program, readout_time: float = 0.0) -> float:
         obs_block.actions,
         readout=readout_time,
         autofocus_sweep=INGEST_AUTOFOCUS_OVERHEAD,
+        autoflat_frame=INGEST_AUTOFLAT_FRAME_OVERHEAD,
     )
 
 

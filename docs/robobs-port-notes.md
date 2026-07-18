@@ -264,3 +264,37 @@ block then cut in front of *FOCUS*.  `reschedule()` now carries the
 hard-timed instant as a `deadline` across the whole alternate walk: no
 alternate may be selected that ends past it, regardless of intermediate
 replacements.
+
+## Sky-flat calibration algorithm (2026-07, id 5 SKYFLAT)
+
+Port of the T80S crontab logic (`query_skyflats.py 5 9 evening` /
+`3 9 morning`) into a robobs calibration project.  One observing block per
+filter, each holding `autoflat` actions (already supported by the block
+dialect; the chimera scheduler dispatches them to the chimera-skyflat
+`AutoSkyFlat` controller via `/Autoflat/0`).
+
+- **When:** programs at the evening (sunset → −18° dusk) and/or morning
+  (−18° dawn → sunrise) windows.  The precise sun-altitude gate belongs to
+  the sky-flat controller (`sun_alt_hi`/`sun_alt_low`); robobs starts the
+  programs at the window edge in order.  Evening executes the blocks in
+  REVERSED ingestion order, morning forward — list blocks from the most to
+  the least sensitive filter (the T80S `filter_order` reversal).
+- **Which filters:** T80S asked the reduction pipeline's QC database; here
+  the robobs database itself is the record — `observed()` writes every
+  executed autoflat (filter, frames, date) to the new `skyflatdb` ledger
+  (production only; the offline simulation's `soft=True` leaves it alone),
+  and make-queue picks the blocks with the fewest ledger frames in the
+  last `lookback` days (never-flatted filters first).  `clean-queue` keeps
+  the ledger: it is history, not queue state.
+- **Scheduling keys:** `flat_window` (evening|morning|both), `n_filters`
+  (int or `{evening: 5, morning: 3}`; the morning selection excludes the
+  evening picks), `lookback` (days, default 15).
+- **Engine:** sky flats run OUTSIDE the −18° night window on a placeholder
+  target, so `check_conditions` waives the night/airmass/moon checks for
+  algorithms with `twilight_calibration = True`.  The ingest skips the
+  auto-slew Point for skyflat blocks (the controller does its own
+  anti-solar pointing — slewing to the placeholder near sunset could aim
+  at the sun) and prices blocks at 60 s per autoflat frame.  The
+  make-queue LST cut also exempts them.
+- New DBs get `skyflatdb` via create_all; existing DBs: it is a new table,
+  created automatically by SQLAlchemy's `create_all` on open.

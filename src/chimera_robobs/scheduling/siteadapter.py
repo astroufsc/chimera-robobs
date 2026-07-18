@@ -65,6 +65,18 @@ class SiteAdapter:
             return ensure_datetime(self._site.sunrise_twilight_begin())
         return ensure_datetime(self._site.sunrise_twilight_begin(self._date_arg(date)))
 
+    def sunset(self, date: dt.datetime | None = None) -> dt.datetime:
+        """Next sunset (horizon 0) after ``date`` — for sky-flat windows."""
+        if date is None:
+            return ensure_datetime(self._site.sunset())
+        return ensure_datetime(self._site.sunset(self._date_arg(date)))
+
+    def sunrise(self, date: dt.datetime | None = None) -> dt.datetime:
+        """Next sunrise (horizon 0) after ``date`` — for sky-flat windows."""
+        if date is None:
+            return ensure_datetime(self._site.sunrise())
+        return ensure_datetime(self._site.sunrise(self._date_arg(date)))
+
     # -- coordinates ----------------------------------------------------
     def ra_dec_to_alt_az(
         self, ra_hours: float, dec_deg: float, lst_in_rads: float

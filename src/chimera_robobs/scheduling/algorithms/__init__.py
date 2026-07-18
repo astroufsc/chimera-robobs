@@ -14,11 +14,19 @@ from chimera_robobs.scheduling.algorithms.base import BaseScheduleAlgorithm
 from chimera_robobs.scheduling.algorithms.extinctionmonitor import ExtinctionMonitor
 from chimera_robobs.scheduling.algorithms.higher import Higher
 from chimera_robobs.scheduling.algorithms.recurrent import Recurrent
+from chimera_robobs.scheduling.algorithms.skyflat import SkyFlat
 from chimera_robobs.scheduling.algorithms.timed import Timed
 from chimera_robobs.scheduling.algorithms.timesequence import TimeSequence
 
 #: the scheduling algorithm classes, in database-id order
-ALGORITHM_CLASSES = (Higher, ExtinctionMonitor, Timed, Recurrent, TimeSequence)
+ALGORITHM_CLASSES = (
+    Higher,
+    ExtinctionMonitor,
+    Timed,
+    Recurrent,
+    TimeSequence,
+    SkyFlat,
+)
 
 #: canonical YAML names for the algorithms (supervisor-style readable
 #: strings), keyed by database id
@@ -28,6 +36,7 @@ ALGORITHM_YAML_NAMES = {
     2: "timed",
     3: "recurrent",
     4: "time_sequence",
+    5: "skyflat",
 }
 
 #: every accepted spelling (lowercase, ``-``/`` `` folded to ``_``) -> id:
@@ -41,7 +50,8 @@ def parse_algorithm_id(value) -> int:
     """Parse a ``scheduling_algorithm`` YAML value into the database id.
 
     Accepts the canonical names (``higher``, ``extinction_monitor``,
-    ``timed``, ``recurrent``, ``time_sequence``), the persisted short names
+    ``timed``, ``recurrent``, ``time_sequence``, ``skyflat``), the
+    persisted short names
     (``HIG``, ``STD``, ...) case-insensitively, and the legacy numeric ids.
     """
     if isinstance(value, bool):
@@ -89,6 +99,7 @@ __all__ = [
     "ExtinctionMonitor",
     "Higher",
     "Recurrent",
+    "SkyFlat",
     "Timed",
     "TimeSequence",
     "build_algorithms",
