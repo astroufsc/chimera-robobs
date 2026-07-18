@@ -797,6 +797,7 @@ def _pair_observing_log(session, entries, start_marker, end_marker) -> list[dict
     """
     programs = []
     current = None
+    flat_program_iters: dict[int, object] = {}
     for entry in entries:
         if start_marker in entry.action:
             target = session.query(Target).filter(Target.id == entry.target_id).first()
@@ -830,16 +831,19 @@ def _pair_observing_log(session, entries, start_marker, end_marker) -> list[dict
             if is_flat:
                 # every flat block shares the placeholder target, so the
                 # log name repeats; label the interval with the block's
-                # FILTER instead, resolved through the queue program whose
-                # planned time matches this entry
-                entry_mjd = jd_from_datetime(entry.time) - MJD_JD_OFFSET
-                flat_programs = (
-                    session.query(Program)
-                    .filter(Program.target_id == entry.target_id)
-                    .all()
-                )
-                queue_program = min(
-                    flat_programs, key=lambda p: abs(p.slew_at - entry_mjd)
+                # FILTER instead.  The log entries and the queue programs
+                # are both chronological, so pair them sequentially (a
+                # nearest-slew_at match misassigns delayed blocks: they
+                # are planned 60 s apart but run for minutes).
+                if entry.target_id not in flat_program_iters:
+                    flat_program_iters[entry.target_id] = iter(
+                        session.query(Program)
+                        .filter(Program.target_id == entry.target_id)
+                        .order_by(Program.slew_at)
+                        .all()
+                    )
+                queue_program = (
+                    next(flat_program_iters[entry.target_id], None) or queue_program
                 )
                 block = (
                     session.query(ObsBlock)
