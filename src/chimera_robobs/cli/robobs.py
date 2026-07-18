@@ -826,8 +826,35 @@ def _pair_observing_log(session, entries, start_marker, end_marker) -> list[dict
                 is_flat = (
                     blockpar is not None and blockpar.sched_algorithm == SkyFlat.id
                 )
+            name = target.name
+            if is_flat:
+                # every flat block shares the placeholder target, so the
+                # log name repeats; label the interval with the block's
+                # FILTER instead, resolved through the queue program whose
+                # planned time matches this entry
+                entry_mjd = jd_from_datetime(entry.time) - MJD_JD_OFFSET
+                flat_programs = (
+                    session.query(Program)
+                    .filter(Program.target_id == entry.target_id)
+                    .all()
+                )
+                queue_program = min(
+                    flat_programs, key=lambda p: abs(p.slew_at - entry_mjd)
+                )
+                block = (
+                    session.query(ObsBlock)
+                    .filter(ObsBlock.id == queue_program.obsblock_id)
+                    .first()
+                )
+                filters = (
+                    [a.filter for a in block.actions if isinstance(a, AutoFlat)]
+                    if block is not None
+                    else []
+                )
+                if filters:
+                    name = ",".join(filters)
             current = {
-                "name": target.name,
+                "name": name,
                 "pid": queue_program.pid if queue_program is not None else None,
                 "ra": target.target_ra,
                 "dec": target.target_dec,
@@ -935,12 +962,13 @@ def cmd_plot_log(args) -> int:
             if not program["aborted"]:
                 ax.fill_between(grid, alts, alt_min, facecolor=colors[group], alpha=0.5)
             ax.text(
-                grid[0],
+                grid[len(grid) // 2] if program.get("flat") else grid[0],
                 alts[0] + 1.2,
                 program["name"],
                 fontsize=7,
                 color=colors[group],
                 clip_on=True,
+                ha="center" if program.get("flat") else "left",
             )
 
             if program.get("flat"):
