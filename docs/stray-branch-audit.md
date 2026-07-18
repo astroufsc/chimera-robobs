@@ -102,3 +102,49 @@ record, belongs in that repo's backlog)
   conditions handle the past-midnight case.
 * **Boolean-typed handler returns** (`mysql` `407de11`) — numpy-bool
   coercion in dew handlers; almost certainly moot in the 2.0 rewrite.
+
+## Investigation: what happens when the queue empties during the night
+
+(2.0 behavior, traced 2026-07-17; relates to the `ab7ecd3` candidate above.)
+
+Chain: scheduler goes IDLE→OFF → `_watch_state_changed` records the event
+and wakes the machine thread → `_handle_scheduler_idle()` →
+`engine.reschedule()` returns `None` → **first** empty pass queues one
+chimera program `SAFETY` (a scheduler `Point` to alt 88°/az 89° — not a
+real `telescope.park()`; dome/cover untouched) and starts the scheduler;
+**subsequent** passes return a 300 s backoff — the machine waits
+(interruptibly) and re-runs the engine directly, without bouncing the
+chimera scheduler.  The loop exits when a program becomes eligible (e.g. a
+Timed `execute_at` arrives — which the `ab7ecd3` stop-instead approach
+would sleep through) or when robobs is stopped.
+
+Improvements over both legacy lines: the wait no longer blocks the bus
+dispatch pool, only one SAFETY program is queued per empty episode, and
+retries don't start/stop the chimera scheduler.
+
+**Confirmed gap — nothing stops the loop at dawn.**  `check_conditions`
+has no night-window/sun-altitude test; its only time gate is "observation
+ends before `site.sunrise_twilight_begin(now)`", and pyephem's
+`next_rising` yields *tomorrow's* dawn once the sun is up, so the check
+passes trivially in daylight.  Any program left `finished == False` after
+dawn (aborted, or weather-rejected all night) keeps being re-evaluated
+every 5 minutes through the day, and is submitted the moment its
+airmass/moon checks pass — a daylight exposure, the exact failure
+`ab7ecd3` fixed in 2018 by stopping robobs after the park.  In production
+the guard is external: the supervisor's `StopRobObsEnd` checklist
+(`robobs stop` in a ±30 min window around sunrise twilight) and
+`LockDomeOnSunrise`; if the supervisor is down or its window conditions
+don't match, nothing protects the telescope from pointing near the Sun.
+
+Recommendations (not yet implemented):
+
+1. Night-window guard in `check_conditions`: it is daytime whenever the
+   next `sunset_twilight_end` comes before the next
+   `sunrise_twilight_begin`; reject in that case.  Closes the gap for all
+   paths, including a manual `wake` at 3 pm.
+2. Optional `stop_when_empty` config reproducing `ab7ecd3` (park once,
+   then `stop()`); default off to keep mid-night Timed recovery.  The
+   supervisor's `OpenAndStartRobObs` checklist restarts robobs at dusk.
+3. `clean_scheduler_on_start` (mysql `e91e84f`): wipe the chimera queue
+   when robobs starts, so a crashed night's stale programs aren't
+   re-executed.
