@@ -207,7 +207,13 @@ def upsert_project(session, config) -> Project:
         if unknown:
             raise ValueError(f"unknown scheduling keys {sorted(unknown)}")
         _out(f"-Scheduling parameters: {scheduling}")
-        project.scheduling = json.dumps(scheduling)
+        # PyYAML parses unquoted timestamps (``at: 2026-07-25 03:12:00``)
+        # into datetimes; store them as the ISO strings the Timed time
+        # parser accepts back
+        project.scheduling = json.dumps(
+            scheduling,
+            default=lambda v: v.isoformat() if isinstance(v, dt.datetime) else str(v),
+        )
 
     _out("-Reading observing block information...")
 

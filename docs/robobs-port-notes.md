@@ -210,3 +210,38 @@ the scheduling section, an occurrence whose `execute_at` falls within
 (`finished` with `observed_at` 0) — a run delayed by a long block no
 longer produces back-to-back timed runs, and longer backlogs
 self-collapse to a single run.
+
+## Timed per-target and absolute-UT times (2026-07)
+
+Motivated by stellar occultations/planet transits (the lna40 OPOP
+pipeline): the start time belongs to each *event*, not to the project,
+and it is an absolute instant, not a "hours after twilight" recurrence.
+A `times` entry (project `scheduling:` section or `--pid-config`) is now
+one of
+
+```yaml
+times:
+- 2                              # hours after the evening twilight (as before)
+- 2026-07-25 03:12:00            # absolute UT; skipped when not tonight
+- target: Chariklo_4321          # occurrence bound to one target
+  at: 2026-07-26 04:40:00        #   (number or UT both accepted)
+```
+
+- Absolute times outside tonight's window are dropped at make-queue time,
+  so a whole semester of events can live permanently in one project's
+  `scheduling:` section — no more per-night pid-config files.
+- Target-bound occurrences bypass the Higher selection entirely: process()
+  emits one synthetic slot per occurrence for that exact target, and
+  next() returns exactly that program (or expires the occurrence when the
+  target is missing from the queue / fails the condition check at its
+  fixed time — conditions at a fixed instant are deterministic, so
+  retrying would wedge every later request of the project).  This lets
+  many same-night events share a single pid without mispairing targets
+  and times.
+- `timeddb` gained a `bound` boolean (existing DBs:
+  `ALTER TABLE timeddb ADD COLUMN bound BOOLEAN DEFAULT 0`); target_id
+  alone cannot flag binding since next() also writes it on unbound rows.
+- Ingestion stores unquoted YAML timestamps (parsed by PyYAML into
+  datetimes) as ISO strings in the scheduling JSON; naive values are UT.
+- Mixing bound and unbound entries in one project logs a warning: the
+  Higher selection for the unbound occurrences may pick a bound target.

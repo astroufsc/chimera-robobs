@@ -592,3 +592,214 @@ def test_timed_process_stores_min_gap(session_factory, site):
     assert gaps[0] == pytest.approx(0.0)  # first occurrence never expires
     assert gaps[1] == pytest.approx(2.0 / 24.0)
     assert gaps[2] == pytest.approx(4.0 / 24.0)
+
+
+# ----------------------------------------------------------------------
+# Timed: absolute UT times and target-bound occurrences
+# ----------------------------------------------------------------------
+
+
+def test_parse_time_entry_forms():
+    from chimera_robobs.scheduling.algorithms.base import TimedError
+    from chimera_robobs.scheduling.algorithms.timed import parse_time_entry
+
+    obs_start, obs_end = _window()
+
+    # number: hours after the evening twilight
+    mjd, name = parse_time_entry(1.0, obs_start, obs_end)
+    assert mjd == pytest.approx(obs_start - MJD_JD_OFFSET + 1.0 / 24.0)
+    assert name is None
+
+    # absolute UT string inside the window
+    at = UT + dt.timedelta(hours=1)
+    mjd, name = parse_time_entry(at.isoformat(), obs_start, obs_end)
+    assert mjd == pytest.approx(jd_from_datetime(at) - MJD_JD_OFFSET)
+    assert name is None
+
+    # PyYAML hands unquoted timestamps over as datetimes already
+    mjd, _ = parse_time_entry(at.replace(tzinfo=None), obs_start, obs_end)
+    assert mjd == pytest.approx(jd_from_datetime(at) - MJD_JD_OFFSET)
+
+    # absolute UT outside the window: not tonight
+    tomorrow = UT + dt.timedelta(days=1)
+    assert parse_time_entry(tomorrow.isoformat(), obs_start, obs_end) is None
+
+    # target binding
+    mjd, name = parse_time_entry(
+        {"target": "occ1", "at": at.isoformat()}, obs_start, obs_end
+    )
+    assert name == "occ1"
+    assert mjd == pytest.approx(jd_from_datetime(at) - MJD_JD_OFFSET)
+
+    for bad in ("not a date", True, {"target": "x"}, {"at": 1.0, "oops": 2}, [1.0]):
+        with pytest.raises(TimedError):
+            parse_time_entry(bad, obs_start, obs_end)
+
+
+def test_timed_process_absolute_ut_times(session_factory, site):
+    factory = session_factory
+    session = factory()
+    _add_block(session, ra_hours=10.0, blockid=1, sched_algorithm=2)
+
+    algorithms = build_algorithms(factory, site)
+    obs_start, obs_end = _window()
+    tonight = UT + dt.timedelta(hours=1)
+    next_week = UT + dt.timedelta(days=7)
+    algorithms[2].process(
+        obs_start=obs_start,
+        obs_end=obs_end,
+        query=_query(session),
+        config={
+            "times": [tonight.isoformat(), next_week.isoformat()],
+            "pid": "P01",
+            "slot_len": 3600.0,
+        },
+    )
+
+    session = factory()
+    timed = session.query(model.TimedDB).one()  # off-night entry dropped
+    assert timed.execute_at == pytest.approx(jd_from_datetime(tonight) - MJD_JD_OFFSET)
+    assert timed.bound is False
+
+
+def test_timed_process_all_times_off_night(session_factory, site):
+    factory = session_factory
+    session = factory()
+    _add_block(session, ra_hours=10.0, blockid=1, sched_algorithm=2)
+
+    algorithms = build_algorithms(factory, site)
+    obs_start, obs_end = _window()
+    slots = algorithms[2].process(
+        obs_start=obs_start,
+        obs_end=obs_end,
+        query=_query(session),
+        config={
+            "times": [(UT + dt.timedelta(days=3)).isoformat()],
+            "pid": "P01",
+            "slot_len": 3600.0,
+        },
+    )
+
+    assert len(slots) == 0
+    assert factory().query(model.TimedDB).count() == 0
+
+
+def test_timed_process_bound_target(session_factory, site):
+    factory = session_factory
+    session = factory()
+    _add_block(session, ra_hours=10.0, blockid=1, sched_algorithm=2)
+    block2 = _add_block(session, ra_hours=10.5, blockid=2, sched_algorithm=2)
+
+    algorithms = build_algorithms(factory, site)
+    obs_start, obs_end = _window()
+    at = UT + dt.timedelta(hours=1)
+    slots = algorithms[2].process(
+        obs_start=obs_start,
+        obs_end=obs_end,
+        query=_query(session),
+        config={
+            "times": [{"target": "tgt2", "at": at.isoformat()}],
+            "pid": "P01",
+            "slot_len": 3600.0,
+        },
+    )
+
+    # no Higher selection at all: one synthetic slot for tgt2 at the
+    # requested time (tgt1 culminates then and Higher would have chosen it)
+    assert list(slots["blockid"]) == [2]
+    assert slots["start"][0] == pytest.approx(jd_from_datetime(at))
+
+    session = factory()
+    timed = session.query(model.TimedDB).one()
+    assert timed.bound is True
+    assert timed.target_id == block2.target_id
+    assert timed.block_id == block2.id
+
+
+def test_timed_process_bound_unknown_target_skipped(session_factory, site):
+    factory = session_factory
+    session = factory()
+    _add_block(session, ra_hours=10.0, blockid=1, sched_algorithm=2)
+
+    algorithms = build_algorithms(factory, site)
+    obs_start, obs_end = _window()
+    at = UT + dt.timedelta(hours=1)
+    slots = algorithms[2].process(
+        obs_start=obs_start,
+        obs_end=obs_end,
+        query=_query(session),
+        config={
+            "times": [{"target": "nonexistent", "at": at.isoformat()}],
+            "pid": "P01",
+            "slot_len": 3600.0,
+        },
+    )
+
+    assert len(slots) == 0
+    assert factory().query(model.TimedDB).count() == 0
+
+
+def _bound_next_setup(factory):
+    """Two targets/blocks/programs; a bound TimedDB request for the second."""
+    session = factory()
+    rows = []
+    for blockid in (1, 2):
+        block = _add_block(session, ra_hours=10.0, blockid=blockid, sched_algorithm=2)
+        target = session.query(model.Target).filter_by(id=block.target_id).one()
+        blockpar = session.query(model.BlockPar).filter_by(id=block.block_par_id).one()
+        program = model.Program(
+            target_id=target.id,
+            name=target.name,
+            priority=1,
+            slew_at=61000.0 + 0.001 * blockid,
+            pid="P01",
+            obsblock_id=block.id,
+            blockpar_id=blockpar.id,
+        )
+        session.add(program)
+        session.commit()
+        rows.append((program, blockpar, block, target))
+    session.add(
+        model.TimedDB(
+            pid="P01",
+            execute_at=61000.25,
+            bound=True,
+            target_id=rows[1][3].id,
+            block_id=rows[1][2].id,
+        )
+    )
+    session.commit()
+    return rows
+
+
+def test_timed_next_bound_returns_exact_target(session_factory, site):
+    factory = session_factory
+    rows = _bound_next_setup(factory)
+
+    algorithms = build_algorithms(factory, site)
+    # program 1 is closer to now, but the request is bound to target 2
+    chosen = algorithms[2].next(61000.0, rows)
+    assert chosen is rows[1]
+    assert chosen[0].slew_at == pytest.approx(61000.25)
+
+
+def test_timed_next_bound_expires_on_failed_check(session_factory, site):
+    factory = session_factory
+    rows = _bound_next_setup(factory)
+    # a later unbound request must not stay wedged behind the doomed one
+    session = factory()
+    session.add(model.TimedDB(pid="P01", execute_at=61000.30))
+    session.commit()
+
+    algorithms = build_algorithms(factory, site)
+    # bound target fails the check -> occurrence expired, and next() falls
+    # through to the later unbound request
+    chosen = algorithms[2].next(
+        61000.0, rows, check=lambda row, mjd, length: mjd != 61000.25
+    )
+    session = factory()
+    bound_row = session.query(model.TimedDB).filter(model.TimedDB.bound).one()
+    assert bound_row.finished is True
+    assert bound_row.observed_at == 0.0  # expired, never ran
+    assert chosen is not None
+    assert chosen[0].slew_at == pytest.approx(61000.30)

@@ -133,6 +133,11 @@ class TimedDB(Base):
     # execute_at falls within min_gap of the previous occurrence's ACTUAL
     # run time is expired — a late run absorbs the occurrences it ran into.
     min_gap = Column(Float, default=0.0)
+    # the occurrence was created for a specific target (``times`` entry with
+    # a ``target:`` binding, e.g. occultations): next() must observe exactly
+    # that target instead of walking the Higher-ordered candidates.  Cannot
+    # be inferred from target_id, which next() also writes on unbound rows.
+    bound = Column(Boolean, default=False)
 
     def __str__(self):
         status = (

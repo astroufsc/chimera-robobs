@@ -348,3 +348,26 @@ def test_project_scheduling_section_stored_and_used(db, tmp_path, capsys):
     capsys.readouterr()
     assert _run(db, "add-project", "-f", str(bad)) == 1
     assert "not_a_scheduling_key" in capsys.readouterr().err
+
+
+def test_project_scheduling_times_with_yaml_timestamps(db, tmp_path):
+    """Unquoted ``at:`` timestamps arrive from PyYAML as datetimes; the
+    stored scheduling JSON must round-trip them as ISO strings the Timed
+    time parser accepts."""
+    import json
+
+    proj = tmp_path / "occ_proj.yaml"
+    base = open(_data("canonical_proj.yaml")).read().split("scheduling:")[0]
+    proj.write_text(
+        base
+        + "scheduling:\n"
+        + "  times:\n"
+        + "  - target: Occ1_123\n"
+        + "    at: 2026-07-25 03:12:00\n"
+        + "  - 2026-07-26 02:00:00\n"
+    )
+    assert _run(db, "add-project", "-f", str(proj)) == 0
+    session = _session(db)
+    stored = json.loads(session.query(model.Project).one().scheduling)
+    assert stored["times"][0] == {"target": "Occ1_123", "at": "2026-07-25T03:12:00"}
+    assert stored["times"][1] == "2026-07-26T02:00:00"
