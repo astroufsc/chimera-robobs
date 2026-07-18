@@ -136,7 +136,12 @@ Follow-up (implemented 2026-07-17):
    limit regardless of what happens next.
 3. **`clean_scheduler_on_start`** (default on): switching robobs on wipes
    stale programs from the chimera scheduler queue (mysql `e91e84f`).
-4. The **plotting feature** was resurrected as `chimera-robobs plot-log`
+4. **Timed fallback**: `Timed.next` walks the candidates (Higher order)
+   until one passes the engine's condition check at `execute_at` — the
+   legacy code committed to the single closest candidate and gave the
+   night's request up when it failed (seen live: a focus standard 0.7°
+   inside its moon limit killed the focus while 60 standards were fine).
+5. The **plotting feature** was resurrected as `chimera-robobs plot-log`
    with the mysql-branch improvements (aborted programs dashed, hourly
    moon-distance annotations, `-f` output file, robust start/end pairing,
    Simulation/Observed title); matplotlib is a core dependency.
