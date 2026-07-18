@@ -941,6 +941,7 @@ def cmd_plot_log(args) -> int:
 
         # one color per PROJECT; tracks are labeled with their target name
         colors: dict[str, str] = {}
+        flat_count = 0  # staggers consecutive flat labels vertically
         for program in programs:
             minutes = int((program["end"] - program["start"]).total_seconds() // 60)
             grid = [
@@ -961,9 +962,17 @@ def cmd_plot_log(args) -> int:
             colors.setdefault(group, line.get_color())
             if not program["aborted"]:
                 ax.fill_between(grid, alts, alt_min, facecolor=colors[group], alpha=0.5)
+            if program.get("flat"):
+                # consecutive flat blocks are narrow and share the same
+                # altitude: cycle the label height so they don't overprint
+                label_x = grid[len(grid) // 2]
+                label_y = alts[0] + 1.2 + (flat_count % 3) * 2.6
+                flat_count += 1
+            else:
+                label_x, label_y = grid[0], alts[0] + 1.2
             ax.text(
-                grid[len(grid) // 2] if program.get("flat") else grid[0],
-                alts[0] + 1.2,
+                label_x,
+                label_y,
                 program["name"],
                 fontsize=7,
                 color=colors[group],
