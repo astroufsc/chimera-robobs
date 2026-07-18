@@ -10,6 +10,7 @@ simulation.  A *program* here is the 4-tuple
 ``(Program, BlockPar, ObsBlock, Target)`` returned by the database query.
 """
 
+import datetime as dt
 import logging
 from collections.abc import Callable
 
@@ -273,8 +274,14 @@ class RobObsEngine:
             # Without this guard a program left unfinished at dawn kept
             # being re-evaluated (and could be executed) in full daylight —
             # the pre-2.0 "observations after the night ends" failure.
-            next_dusk = self.site.sunset_twilight_end(date_time).replace(tzinfo=None)
-            next_dawn = self.site.sunrise_twilight_begin(date_time).replace(tzinfo=None)
+            # Evaluated one minute ahead: schedules start exactly at the
+            # dusk instant and the MJD round trip loses microseconds, which
+            # must not flip the decision to "daytime".
+            guard_time = date_time + dt.timedelta(minutes=1)
+            next_dusk = self.site.sunset_twilight_end(guard_time).replace(tzinfo=None)
+            next_dawn = self.site.sunrise_twilight_begin(guard_time).replace(
+                tzinfo=None
+            )
             if next_dusk < next_dawn:
                 self.log.warning(
                     "Daytime @ %s (next dusk %s < next dawn %s): not observable.",

@@ -271,3 +271,48 @@ def test_check_conditions_rejects_daytime(session_factory):
     night_site = FakeSite(latitude=0.0, lst_rads=10.0 * math.pi / 12.0)
     engine = RobObsEngine(session_factory, night_site, log=LOG)
     assert engine.check_conditions(rows, 61000.0)
+
+
+def test_night_guard_tolerates_dusk_boundary_jitter(session_factory):
+    """Seen live: schedules start exactly at dusk and the MJD round trip
+    loses microseconds, putting the evaluation 1 us before the dusk
+    instant — that must still count as night."""
+    import datetime as dt
+
+    from chimera_robobs.scheduling.dates import mjd_from_datetime
+
+    from .fakes import UT
+
+    dusk = UT
+
+    class BoundarySite(FakeSite):
+        """Absolute twilight times: dusk at UT, dawn 10 h later."""
+
+        def sunset_twilight_end(self, date=None):
+            date = self._parse(date)
+            return dusk if date < dusk else dusk + dt.timedelta(hours=24)
+
+        def sunrise_twilight_begin(self, date=None):
+            date = self._parse(date)
+            dawn = dusk + dt.timedelta(hours=10)
+            return dawn if date < dawn else dawn + dt.timedelta(hours=24)
+
+    session = session_factory()
+    _add_program(session, "P01", 1, slew_at=61000.0)
+    rows = (
+        session.query(model.Program, model.BlockPar, model.ObsBlock, model.Target)
+        .join(model.BlockPar, model.Program.blockpar_id == model.BlockPar.id)
+        .join(model.ObsBlock, model.Program.obsblock_id == model.ObsBlock.id)
+        .join(model.Target, model.Program.target_id == model.Target.id)
+        .one()
+    )
+
+    site = BoundarySite(latitude=0.0, lst_rads=10.0 * math.pi / 12.0)
+    engine = RobObsEngine(session_factory, site, log=LOG)
+
+    just_before_dusk = mjd_from_datetime(dusk - dt.timedelta(microseconds=1))
+    assert engine.check_conditions(rows, just_before_dusk)
+
+    # a genuinely daytime instant (hours before dusk) still rejects
+    afternoon = mjd_from_datetime(dusk - dt.timedelta(hours=4))
+    assert not engine.check_conditions(rows, afternoon)
