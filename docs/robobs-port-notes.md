@@ -257,3 +257,10 @@ now expose `is_hard_timed(program)` (True for a pending *bound* TimedDB
 occurrence); the engine skips that branch for hard-timed references, so
 only alternates that fit **before** ``slew_at`` may cut in front.
 Slippable timed programs (focus + `expire_overdue`) keep the old behavior.
+
+Follow-up: guarding only the current reference was not enough — a fitting
+FOCUS run replaced the occultation as the comparison baseline and the long
+block then cut in front of *FOCUS*.  `reschedule()` now carries the
+hard-timed instant as a `deadline` across the whole alternate walk: no
+alternate may be selected that ends past it, regardless of intermediate
+replacements.

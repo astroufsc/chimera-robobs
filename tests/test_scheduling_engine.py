@@ -381,3 +381,49 @@ def test_hard_timed_program_still_backfilled_by_short_alternate(session_factory)
     selected = engine.reschedule(now)
     assert selected is not None
     assert selected[0].id == short.id
+
+
+def test_hard_timed_deadline_survives_reference_replacement(session_factory):
+    """The occultation's instant must keep protecting the slot after a
+    fitting alternate replaces it as the comparison baseline.  Seen in
+    simulation: FOCUS (fits) replaced the occultation as reference, then a
+    3.4 h block cut in front of FOCUS via the observable-later branch and
+    the occultation was acquired 33 min late."""
+    session = session_factory()
+    engine, site = _engine(session_factory)
+    now = site.mjd()
+
+    occ = _add_program(session, "OPOP", 1, slew_at=now + 0.1)  # 2.4 h away
+    blockpar = session.query(model.BlockPar).filter(model.BlockPar.pid == "OPOP").one()
+    blockpar.sched_algorithm = 2
+    occ_block = session.query(model.ObsBlock).filter(model.ObsBlock.pid == "OPOP").one()
+    session.add(
+        model.TimedDB(
+            pid="OPOP",
+            execute_at=now + 0.1,
+            bound=True,
+            target_id=occ.target_id,
+            block_id=occ_block.id,
+        )
+    )
+    session.commit()
+
+    # slippable timed FOCUS that fits before the occultation (60 s block,
+    # slew in ~15 min): replaces the occultation as reference
+    focus = _add_program(session, "FOCUS", 2, slew_at=now + 0.01)
+    blockpar = session.query(model.BlockPar).filter(model.BlockPar.pid == "FOCUS").one()
+    blockpar.sched_algorithm = 2
+    session.add(model.TimedDB(pid="FOCUS", execute_at=now + 0.01))
+    session.commit()
+
+    # long low-priority block: ends past the occultation instant, and FOCUS
+    # (the current reference by then) is happily observable later
+    long_block = _add_program(session, "PLO", 5, slew_at=0.0)
+    block = session.query(model.ObsBlock).filter(model.ObsBlock.pid == "PLO").one()
+    block.length = 0.2 * 86400.0  # 4.8 h
+    session.commit()
+
+    selected = engine.reschedule(now)
+    assert selected is not None
+    assert selected[0].id == focus.id  # back-fill, not the 4.8 h block
+    assert selected[0].id != long_block.id

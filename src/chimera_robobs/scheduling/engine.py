@@ -180,6 +180,20 @@ class RobObsEngine:
 
         self.log.info("Wait time is: %.2f m", waittime / 60.0)
 
+        # Instant of the reference program when it is hard-timed (a bound
+        # occultation): alternates may back-fill in front of it, but nothing
+        # may be selected that ends past it.  Tracked separately from
+        # ``waittime`` because a fitting alternate replaces the reference —
+        # later alternates then compete against the replacement, and the
+        # occultation's constraint would otherwise be lost transitively
+        # (seen in simulation: FOCUS replaced the occultation, then a 3.4 h
+        # block cut in front of FOCUS and the event was acquired 33 m late).
+        deadline = None
+        if program is not None and self.algorithms[
+            program[1].sched_algorithm
+        ].is_hard_timed(program):
+            deadline = program[0].slew_at
+
         for p in plist[1:]:
             # Get program and program duration (length)
             aprogram, aplen = self.get_program(nowmjd, p)
@@ -197,6 +211,8 @@ class RobObsEngine:
                 program, plen = aprogram, aplen
                 waittime = max((program[0].slew_at - nowmjd) * SECONDS_PER_DAY, 0.0)
                 self.log.info("Wait time is: %.2f m", waittime / 60.0)
+                if self.algorithms[program[1].sched_algorithm].is_hard_timed(program):
+                    deadline = program[0].slew_at
                 continue
             elif not can_observe:
                 # if the condition is False, the project cannot be executed.
@@ -215,7 +231,12 @@ class RobObsEngine:
 
             self.log.info("Wait time is: %.2f m", awaittime / 60.0)
 
-            if awaittime + aplen < waittime:
+            ends_before_deadline = (
+                deadline is None
+                or nowmjd + (awaittime + aplen) / SECONDS_PER_DAY <= deadline
+            )
+
+            if awaittime + aplen < waittime and ends_before_deadline:
                 self.log.info(
                     "Program with priority %i fits in this slot. Selecting it instead.",
                     p,
@@ -223,6 +244,7 @@ class RobObsEngine:
                 program, plen, waittime = aprogram, aplen, awaittime
             elif (
                 awaittime < waittime
+                and ends_before_deadline
                 and not self.algorithms[program[1].sched_algorithm].is_hard_timed(
                     program
                 )
@@ -232,11 +254,10 @@ class RobObsEngine:
             ):
                 # Checks if the program with higher priority can be observed
                 # later on. If so, use the current program instead if the
-                # waittime is lower.  Not for hard-timed programs (bound
-                # occultations): they are still condition-observable after
-                # the alternate ends, but their instant has passed — only an
-                # alternate that FITS before slew_at (branch above) may cut
-                # in front.
+                # waittime is lower.  Both branches also require the alternate
+                # to end before the hard-timed deadline (bound occultations):
+                # a delayed slippable program is still condition-observable
+                # later, but the occultation's instant would be gone.
                 self.log.info(
                     "Program with higher priority can be executed after current "
                     "program. Selecting program with priority %i.",
