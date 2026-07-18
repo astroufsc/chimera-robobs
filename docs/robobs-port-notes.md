@@ -298,3 +298,6 @@ dialect; the chimera scheduler dispatches them to the chimera-skyflat
   make-queue LST cut also exempts them.
 - New DBs get `skyflatdb` via create_all; existing DBs: it is a new table,
   created automatically by SQLAlchemy's `create_all` on open.
+- The offline `process-queue` simulator widens its clock to
+  `[min(slew_at), max(slew_at)+30 min]` around the night so evening flats
+  are not shifted to dusk and morning flats are not dropped at dawn.

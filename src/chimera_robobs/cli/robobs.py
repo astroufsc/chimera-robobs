@@ -48,6 +48,7 @@ import yaml
 from chimera.util.coord import Coord
 from chimera.util.position import Position
 from sqlalchemy import and_, desc, or_
+from sqlalchemy import func as sqla_func
 
 from chimera_robobs.scheduling.algorithms import (
     build_algorithms,
@@ -1241,13 +1242,26 @@ def cmd_process_queue(args) -> int:
         algorithms = build_algorithms(factory, site)
         engine = RobObsEngine(factory, site, log=log, algorithms=algorithms)
 
+        # twilight calibration programs (sky flats) live outside the
+        # -18 deg night: widen the simulation clock to cover them
+        slew_range = (
+            session.query(
+                sqla_func.min(Program.slew_at), sqla_func.max(Program.slew_at)
+            )
+            .filter(Program.finished == False)  # noqa: E712
+            .one()
+        )
         otime = obs_start
+        sim_end = obs_end
+        if slew_range[0] is not None:
+            otime = min(obs_start, float(slew_range[0]))
+            sim_end = max(obs_end, float(slew_range[1]) + 1800.0 / SECONDS_PER_DAY)
         app_open = 0.0
         idle = 0.0
 
         tel_pos = None  # current telescope position
 
-        while otime < obs_end:
+        while otime < sim_end:
             _out(f"Requesting target @ {otime:f}")
             program_list = engine.reschedule(otime)
             if not program_list:
@@ -1347,8 +1361,9 @@ def cmd_process_queue(args) -> int:
 
         session.commit()
 
-        _out(f"@ {otime:.4f}: Idle for {(obs_end - otime) * 24.0:.2f}h")
-        idle += obs_end - otime
+        if otime < obs_end:
+            _out(f"@ {otime:.4f}: Idle for {(obs_end - otime) * 24.0:.2f}h")
+            idle += obs_end - otime
         _out(f"@ {obs_end:.4f}: Night end")
         _out("-Total idle time: %.2fh" % (idle * 24.0))
         _out("-Total open shutter time: %.2fh" % (app_open / 60.0 / 60.0))
