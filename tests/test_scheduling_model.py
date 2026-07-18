@@ -220,3 +220,14 @@ def test_created_at_default_is_call_time(session_factory):
     session.commit()
     # legacy default=datetime.today() was evaluated once at import time
     assert second.created_at > first.created_at
+
+
+def test_blockpar_str_with_fractional_cloud_cover():
+    # the production project files carry cloudcover: 0.8 (a fraction); the
+    # legacy :2d format crashed on it (seen live on the zwo-nuc deployment)
+    blockpar = model.BlockPar(
+        bid=1, pid="P01", max_airmass=2.5, max_seeing=2.0
+    )
+    blockpar.cloud_cover = 0.8
+    blockpar.sched_algorithm = 3
+    assert "0.8" in str(blockpar)

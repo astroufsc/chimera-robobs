@@ -214,7 +214,8 @@ class BlockPar(Base):
     min_moon_bright = Column(Float, default=0.0)  # percent
     min_moon_distance = Column(Float, default=-1.0)  # degrees
     max_seeing = Column(Float, default=2.0)  # arcsec
-    cloud_cover = Column(Integer, default=0)  # user defined scale
+    # user-defined scale; the production files use 0-1 fractions
+    cloud_cover = Column(Float, default=0.0)
     sched_algorithm = Column(Integer, default=0)  # scheduling algorithm id
     apply_ext_corr = Column(Boolean, default=False)
 
@@ -222,7 +223,7 @@ class BlockPar(Base):
         return (
             f"#[id: {self.id!s:>4}][bid: {self.bid!s:>4}][PID: {self.pid!s:>10}]"
             f"[airmass: {self.max_airmass:5.2f}][seeing: {self.max_seeing:5.2f}]"
-            f"[cloud: {self.cloud_cover:2d}][schedAlgorithm: {self.sched_algorithm:2d}]"
+            f"[cloud: {self.cloud_cover:4.1f}][schedAlgorithm: {self.sched_algorithm:2d}]"
         )
 
 
