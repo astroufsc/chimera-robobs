@@ -323,6 +323,25 @@ class Timed(Higher):
         finally:
             session.commit()
 
+    def is_hard_timed(self, program) -> bool:
+        """A program serving a pending bound occurrence is immovable."""
+        session = self.session()
+        try:
+            return (
+                session.query(TimedDB)
+                .filter(
+                    TimedDB.bound == True,  # noqa: E712
+                    TimedDB.finished == False,  # noqa: E712
+                    TimedDB.pid == program[0].pid,
+                    TimedDB.target_id == program[0].target_id,
+                    TimedDB.block_id == program[2].id,
+                )
+                .first()
+                is not None
+            )
+        finally:
+            session.commit()
+
     def observed(self, time, program, soft=False):
         session = self.session()
 

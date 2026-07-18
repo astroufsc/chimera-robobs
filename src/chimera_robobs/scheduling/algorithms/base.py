@@ -85,6 +85,16 @@ class BaseScheduleAlgorithm:
     def observed(self, time, program, soft=False):
         """Process a program as observed."""
 
+    def is_hard_timed(self, program) -> bool:
+        """Whether ``program``'s scheduled time is immovable.
+
+        The engine may delay an ordinary timed program (e.g. a focus run
+        slips past a long block; ``expire_overdue`` absorbs the backlog),
+        but a hard-timed one (an occultation bound to its instant) must
+        never be scheduled behind a block that ends after its ``slew_at``.
+        """
+        return False
+
     def add(self, block):
         """Process a block being added to the queue."""
 

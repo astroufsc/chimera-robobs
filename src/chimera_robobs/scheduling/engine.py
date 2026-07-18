@@ -221,12 +221,22 @@ class RobObsEngine:
                     p,
                 )
                 program, plen, waittime = aprogram, aplen, awaittime
-            elif awaittime < waittime and self.check_conditions(
-                program, nowmjd + (awaittime + aplen) / SECONDS_PER_DAY, plen
+            elif (
+                awaittime < waittime
+                and not self.algorithms[program[1].sched_algorithm].is_hard_timed(
+                    program
+                )
+                and self.check_conditions(
+                    program, nowmjd + (awaittime + aplen) / SECONDS_PER_DAY, plen
+                )
             ):
                 # Checks if the program with higher priority can be observed
                 # later on. If so, use the current program instead if the
-                # waittime is lower.
+                # waittime is lower.  Not for hard-timed programs (bound
+                # occultations): they are still condition-observable after
+                # the alternate ends, but their instant has passed — only an
+                # alternate that FITS before slew_at (branch above) may cut
+                # in front.
                 self.log.info(
                     "Program with higher priority can be executed after current "
                     "program. Selecting program with priority %i.",

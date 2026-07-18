@@ -245,3 +245,15 @@ times:
   datetimes) as ISO strings in the scheduling JSON; naive values are UT.
 - Mixing bound and unbound entries in one project logs a warning: the
   Higher selection for the unbound occurrences may pick a bound target.
+
+### Hard-timed programs and the reschedule back-fill (2026-07)
+
+`reschedule()`'s "higher priority program can be executed after current
+program" branch only re-checked *conditions* at the later time — true for
+an occultation target that is still up, yet its instant has passed.  Seen
+in the 2026-07-20 preview: a 3.4 h BRUCH block was selected 2.9 h before
+the Kreusa occultation and the event was acquired 33 min late.  Algorithms
+now expose `is_hard_timed(program)` (True for a pending *bound* TimedDB
+occurrence); the engine skips that branch for hard-timed references, so
+only alternates that fit **before** ``slew_at`` may cut in front.
+Slippable timed programs (focus + `expire_overdue`) keep the old behavior.

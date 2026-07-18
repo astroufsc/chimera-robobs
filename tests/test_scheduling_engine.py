@@ -316,3 +316,68 @@ def test_night_guard_tolerates_dusk_boundary_jitter(session_factory):
     # a genuinely daytime instant (hours before dusk) still rejects
     afternoon = mjd_from_datetime(dusk - dt.timedelta(hours=4))
     assert not engine.check_conditions(rows, afternoon)
+
+
+def test_hard_timed_program_is_not_delayed_by_long_alternate(session_factory):
+    """A BOUND timed program (occultation) must not be scheduled behind an
+    alternate that ends after its instant, even though the target would
+    still be condition-observable then.  Slippable timed programs (focus)
+    keep the old behavior (test above)."""
+    session = session_factory()
+    engine, site = _engine(session_factory)
+    now = site.mjd()
+
+    occ = _add_program(session, "OPOP", 1, slew_at=now + 0.05)
+    blockpar = session.query(model.BlockPar).filter(model.BlockPar.pid == "OPOP").one()
+    blockpar.sched_algorithm = 2
+    occ_row = session.query(model.ObsBlock).filter(model.ObsBlock.pid == "OPOP").one()
+    session.add(
+        model.TimedDB(
+            pid="OPOP",
+            execute_at=now + 0.05,
+            bound=True,
+            target_id=occ.target_id,
+            block_id=occ_row.id,
+        )
+    )
+    session.commit()
+
+    # low-priority alternate observable right now but LONGER than the wait
+    long_block = _add_program(session, "PLO", 5, slew_at=0.0)
+    block = session.query(model.ObsBlock).filter(model.ObsBlock.pid == "PLO").one()
+    block.length = 0.1 * 86400.0  # 2.4 h >> 1.2 h wait
+    session.commit()
+
+    selected = engine.reschedule(now)
+    assert selected is not None
+    assert selected[0].id == occ.id
+    assert selected[0].id != long_block.id
+
+
+def test_hard_timed_program_still_backfilled_by_short_alternate(session_factory):
+    """An alternate that FITS before the bound program's instant is still
+    selected to fill the wait."""
+    session = session_factory()
+    engine, site = _engine(session_factory)
+    now = site.mjd()
+
+    occ = _add_program(session, "OPOP", 1, slew_at=now + 0.05)
+    blockpar = session.query(model.BlockPar).filter(model.BlockPar.pid == "OPOP").one()
+    blockpar.sched_algorithm = 2
+    occ_row = session.query(model.ObsBlock).filter(model.ObsBlock.pid == "OPOP").one()
+    session.add(
+        model.TimedDB(
+            pid="OPOP",
+            execute_at=now + 0.05,
+            bound=True,
+            target_id=occ.target_id,
+            block_id=occ_row.id,
+        )
+    )
+    session.commit()
+
+    short = _add_program(session, "PLO", 5, slew_at=0.0)  # 60 s block
+
+    selected = engine.reschedule(now)
+    assert selected is not None
+    assert selected[0].id == short.id
