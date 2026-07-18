@@ -258,8 +258,9 @@ def test_timed_next_overrides_slew_at(session_factory, site):
     algorithms = build_algorithms(factory, site)
     chosen = algorithms[2].next(61000.0, [(program, blockpar, block, target)])
     assert chosen is not None
-    session = factory()
-    assert session.query(model.Program).one().slew_at == pytest.approx(61000.25)
+    # the override must land on the CALLER's row, not only in the database
+    # (a merged copy left the caller holding the stale slot time)
+    assert chosen[0].slew_at == pytest.approx(61000.25)
 
     # observed() marks the timed request as done
     algorithms[2].observed(61000.25, (program, blockpar, block, target), soft=True)

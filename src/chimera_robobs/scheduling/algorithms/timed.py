@@ -63,10 +63,10 @@ class Timed(Higher):
         session = self.session()
 
         try:
-            program = session.merge(programs[0][0])
+            pid = programs[0][0].pid
             timed_observation = (
                 session.query(TimedDB)
-                .filter(TimedDB.finished == False, TimedDB.pid == program.pid)  # noqa: E712
+                .filter(TimedDB.finished == False, TimedDB.pid == pid)  # noqa: E712
                 .order_by(TimedDB.execute_at)
                 .first()
             )
@@ -76,15 +76,15 @@ class Timed(Higher):
 
             program_list = super().next(now_mjd, programs)
 
-            program = session.merge(program_list[0])
-
             # Again, use higher to select a target but replace slew_at with
-            # execute_at.
-            program.slew_at = timed_observation.execute_at
+            # execute_at — on the caller's row: setting it on a merged copy
+            # in this session left the caller holding the stale slot time
+            # (seen live: the timed program executed at its slot time
+            # instead of the requested one).
+            program_list[0].slew_at = timed_observation.execute_at
 
-            obsblock = session.merge(program_list[2])
-            timed_observation.target_id = program.target_id
-            timed_observation.block_id = obsblock.id
+            timed_observation.target_id = program_list[0].target_id
+            timed_observation.block_id = program_list[2].id
 
             return program_list
         finally:
