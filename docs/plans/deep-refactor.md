@@ -1,8 +1,20 @@
 # chimera-robobs deep refactor plan
 
-Status: **draft — awaiting execution**
+Status: **executed** (2026-07-17, commits `f42d978..`; 75 tests passing)
 Scope: whole repository (`src/`, `tests/`, packaging, docs).
 Baseline: `cd34b23` — 34 tests passing, `ruff check` clean.
+
+Execution notes (deviations discovered while executing):
+
+* The block-list reader was replaced with a plain whitespace parser —
+  astropy's `ascii.no_header` cannot split the tab+space-mixed production
+  `.list` files (an input-compat fix beyond the §F list).
+* The machine also services reschedule requests while in the OFF machine
+  state: the legacy event handler reacted regardless of the machine state
+  (only `rob_state` gates the reaction), and the first controller tests
+  caught the difference.
+* `pre-commit` was added to the dev dependency group so the README's
+  `uv run pre-commit` instruction works.
 
 ## Context and goals
 

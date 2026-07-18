@@ -167,3 +167,43 @@ def test_check_conditions_seeing(session_factory):
 
     engine.seeing = lambda: 1.0
     assert engine.check_conditions(rows, 61000.0)
+
+
+def test_earlier_observation_uses_earliest_feasible_candidate(session_factory):
+    """Regression for the deep-refactor fix: when a Higher program's slew_at
+    is in the future but conditions are already fine now, the engine moves
+    slew_at to the *earliest* feasible time (the legacy loop kept the last
+    candidate, nullifying the feature)."""
+    session = session_factory()
+    engine, site = _engine(session_factory)
+    now = site.mjd()
+    _add_program(session, "P01", 1, slew_at=now + 0.05)  # ~1.2 h in the future
+
+    program, _ = engine.get_program(now, 1)
+    assert program is not None
+    # target is at the zenith the whole (fake) night: observable right away
+    assert program[0].slew_at == pytest.approx(now)
+
+
+def test_lower_priority_program_fills_wait_slot(session_factory):
+    """A lower-priority program that fits inside the higher-priority
+    program's wait time is selected instead."""
+    session = session_factory()
+    engine, site = _engine(session_factory)
+    now = site.mjd()
+
+    # high-priority program far in the future with a timed constraint so the
+    # engine cannot move it earlier
+    high = _add_program(session, "PHI", 1, slew_at=now + 0.2)
+    blockpar = session.query(model.BlockPar).filter(model.BlockPar.pid == "PHI").one()
+    blockpar.sched_algorithm = 2  # Timed: slew_at is a hard constraint
+    session.add(model.TimedDB(pid="PHI", execute_at=now + 0.2))
+    session.commit()
+
+    # low-priority program observable right now
+    low = _add_program(session, "PLO", 5, slew_at=0.0)
+
+    selected = engine.reschedule(now)
+    assert selected is not None
+    assert selected[0].id == low.id
+    assert selected[0].id != high.id

@@ -611,24 +611,43 @@ def add_observing_block(session, row, config) -> ObsBlock | None:
     return addblock
 
 
+def _read_block_list(path: str) -> list[tuple[str, int, int, str, int]]:
+    """Parse a block-list file: 5 whitespace-delimited columns
+    ``pid blockid target_id config_yaml_path blockpar_bid`` (the production
+    files mix spaces and tabs; blank lines and #-comments are skipped)."""
+    rows = []
+    with open(path) as fp:
+        for lineno, line in enumerate(fp, start=1):
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split()
+            if len(parts) < 5:
+                raise ValueError(f"{path}:{lineno}: expected 5 columns, got {line!r}")
+            rows.append(
+                (parts[0], int(parts[1]), int(parts[2]), parts[3], int(parts[4]))
+            )
+    return rows
+
+
 def cmd_add_observing_block(args) -> int:
     """Add observing block definitions to the database."""
-    from astropy.table import Table
-
     if not args.filename:
         _err("*Input not given. Use '-f'...")
         return 1
 
     _out(f"-Reading observing blocks from {args.filename}")
 
-    block_list = Table.read(args.filename, format="ascii.no_header")
+    try:
+        block_list = _read_block_list(args.filename)
+    except ValueError as e:
+        _err(str(e))
+        return 1
 
     backup_database(args)
     session = _session_factory(args)()
 
-    for entry in block_list:
-        raw = list(entry)
-        row = (str(raw[0]), int(raw[1]), int(raw[2]), str(raw[3]), int(raw[4]))
+    for row in block_list:
         try:
             config = _load_yaml(row[3])
         except yaml.YAMLError as exc:

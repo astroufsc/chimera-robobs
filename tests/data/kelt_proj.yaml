@@ -1,0 +1,13 @@
+# kelt-style project file: the block section has a name but no id/pid
+# (lna40/old/robobs/chimera-config/kelt_project.yaml)
+project:
+  pid: KELT
+  pi: Kelt Team
+  abstract: KELT follow-up
+  url: www.lna.br
+  priority: 10
+observing_blocks:
+  block:
+    name: block
+    maxairmass: 2.0
+    schedalgorith: 0

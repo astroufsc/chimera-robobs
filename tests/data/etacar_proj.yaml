@@ -1,0 +1,21 @@
+# verbatim excerpt of the LNA Robo40 production project file
+# (lna40/old/robobs/chimera-config/etacar_proj.yaml)
+project:
+  pid: ETACAR
+  pi: Augusto Daminelli
+  abstract: Eta-carinae long term observations
+  url: www.lna.br
+  priority: 20
+observing_blocks:
+  block 1:
+    id: 0
+    pid: ETACAR
+    maxairmass: 3.0
+    minairmass: -1
+    maxmoonBright: 100.
+    minmoonBright: 00.
+    minmoonDist: 40.
+    maxseeing: 1.5
+    cloudcover: 0.8
+    schedalgorith: 3
+    applyextcorr: 1

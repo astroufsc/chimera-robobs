@@ -153,3 +153,70 @@ def test_dates_helpers():
     # JD 2440587.5 is the unix epoch
     assert jd_from_datetime(dt.datetime(1970, 1, 1)) == 2440587.5
     assert to_ephem_date(date) == "2026/07/06 12:00:00"
+
+
+def test_block_duration_overhead_profiles():
+    actions = [
+        model.Point(target_name="x"),
+        model.Expose(frames=2, exptime=30.0),
+        model.AutoFocus(start=100, end=200, step=10),  # sweep
+        model.AutoFocus(start=0, end=0, step=0),  # T80S "set position" sentinel
+        model.AutoFocus(start=0, end=0, step=-1),  # T80S "align" no-op
+    ]
+    # engine profile: exposures only, no overheads
+    assert model.block_duration(actions) == pytest.approx(60.0)
+    # CLI ingest profile: 12 s readout + 600 s focus sweep
+    assert model.block_duration(
+        actions, readout=12.0, autofocus_sweep=600.0
+    ) == pytest.approx(2 * (30.0 + 12.0) + 600.0)
+    # extinction-monitor profile: config-driven align/set overheads
+    assert model.block_duration(
+        actions, readout=1.0, autofocus_sweep=100.0, autofocus_set=7.0
+    ) == pytest.approx(2 * 31.0 + 100.0 + 7.0)
+    assert model.block_duration([]) == 0.0
+
+
+def test_expose_compress_format_and_wait_dome_round_trip(session_factory):
+    session = session_factory()
+    expose = model.Expose(
+        frames=1, exptime=1.0, compress_format="fits_rice", wait_dome=False
+    )
+    session.add(expose)
+    session.commit()
+
+    session = session_factory()
+    stored = session.query(model.Expose).one()
+    assert stored.compress_format == "fits_rice"
+    assert stored.wait_dome is False
+    chimera_expose = stored.chimera_action()
+    assert chimera_expose.compress_format == "fits_rice"
+    assert chimera_expose.wait_dome is False
+
+
+def test_mjd_helpers():
+    from chimera_robobs.scheduling.dates import (
+        MJD_JD_OFFSET,
+        datetime_from_mjd,
+        mjd_from_datetime,
+    )
+
+    # MJD 0 is 1858-11-17T00:00:00 UTC
+    assert datetime_from_mjd(0.0) == dt.datetime(1858, 11, 17, tzinfo=dt.UTC)
+    date = dt.datetime(2026, 7, 6, 12, 0, 0, tzinfo=dt.UTC)
+    assert datetime_from_mjd(mjd_from_datetime(date)) == date
+    assert jd_from_datetime(date) - mjd_from_datetime(date) == MJD_JD_OFFSET
+
+
+def test_created_at_default_is_call_time(session_factory):
+    import time as time_module
+
+    session = session_factory()
+    first = model.Program(name="a")
+    session.add(first)
+    session.commit()
+    time_module.sleep(0.02)
+    second = model.Program(name="b")
+    session.add(second)
+    session.commit()
+    # legacy default=datetime.today() was evaluated once at import time
+    assert second.created_at > first.created_at

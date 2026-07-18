@@ -4,12 +4,16 @@
 """Deterministic fakes for the robobs tests (no bus, no hardware)."""
 
 import datetime as dt
+import math
 
 from chimera.util.position import Position
 
-from chimera_robobs.scheduling.dates import jd_from_datetime
+from chimera_robobs.scheduling.dates import ensure_datetime, jd_from_datetime
 
 UT = dt.datetime(2026, 7, 6, 5, 0, 0, tzinfo=dt.UTC)
+
+#: sidereal days per solar day
+SIDEREAL_RATE = 1.0027379
 
 
 class FakeSite:
@@ -60,3 +64,51 @@ class FakeSite:
 
     def moon_phase(self, date=None) -> float:
         return self._moon_phase
+
+
+class RotatingSite(FakeSite):
+    """FakeSite whose LST advances with the date passed in.
+
+    The LST equals ``lst_rads`` at ``ut_now`` and advances at the sidereal
+    rate; dates may be datetimes or pyephem-style strings (as sent by
+    ``SiteAdapter`` over the fake proxy boundary).
+    """
+
+    def _parse(self, date) -> dt.datetime:
+        if date is None:
+            return self._ut
+        if isinstance(date, str):
+            return dt.datetime.strptime(date, "%Y/%m/%d %H:%M:%S").replace(
+                tzinfo=dt.UTC
+            )
+        return ensure_datetime(date)
+
+    def lst_in_rads(self, date=None) -> float:
+        date = self._parse(date)
+        elapsed_days = (date - self._ut).total_seconds() / 86400.0
+        return (self._lst + elapsed_days * SIDEREAL_RATE * 2.0 * math.pi) % (
+            2.0 * math.pi
+        )
+
+
+class FakeSchedulerProxy:
+    """Records the calls the RobObs machine makes on the chimera scheduler."""
+
+    def __init__(self):
+        self.calls = []
+
+    def start(self):
+        self.calls.append("start")
+        return True
+
+    def stop(self):
+        self.calls.append("stop")
+        return True
+
+
+class FakeBus:
+    def __init__(self):
+        self.shutdown_called = False
+
+    def shutdown(self):
+        self.shutdown_called = True

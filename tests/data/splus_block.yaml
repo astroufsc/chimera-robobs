@@ -1,0 +1,22 @@
+# T80S-style block: compress_format, dither offset, uppercase imageType value
+# (t80s_scripts/robobs/chimera-cfg/splus_block_dither2_sorted.yaml excerpt)
+pos-actions:
+  - action: expose
+    filter: R
+    frames: 1
+    exptime: 99
+    imageType: OBJECT
+    compress_format: fits_rice
+    objectName: "{pid}-{name}"
+    filename: "{pid}-$DATE-$TIME"
+  - action: point
+    offset:
+      east: 10
+  - action: expose
+    filter: R
+    frames: 1
+    exptime: 99
+    imageType: OBJECT
+    compress_format: fits_rice
+    objectName: "{pid}-{name}"
+    filename: "{pid}-$DATE-$TIME"

@@ -1,0 +1,25 @@
+# LNA Robo40-style block: pre-actions, wait_dome, binning, lowercase image
+# type (lna40/old/robobs/chimera-config/etacar_block.yaml excerpt)
+pre-actions:
+  - action: expose
+    frames: 1
+    exptime: 0
+    imageType: bias
+    shutter: CLOSE
+    filename: "bias-$DATE-$TIME"
+pos-actions:
+  - action: expose
+    filter: V
+    frames: 2
+    exptime: 20.5
+    imageType: object
+    binning: 2x2
+    wait_dome: True
+    objectName: "{name}"
+    filename: "{name}-$DATE-$TIME"
+  - action: autofocus
+    start: 2500
+    end: 5000
+    step: 250
+    filter: V
+    exptime: 20

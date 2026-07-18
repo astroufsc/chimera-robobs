@@ -93,31 +93,29 @@ class Machine(threading.Thread):
         sched = self.controller.get_scheduler()
 
         while self.state() != MachineState.SHUTDOWN:
-            if self.state() == MachineState.OFF:
-                log.debug("[off] will just sleep..")
-                self._sleep()
-
-            elif self.state() == MachineState.START:
+            if self.state() == MachineState.START:
                 log.debug("[start] waking scheduler...")
                 sched.start()
                 self.state(MachineState.BUSY)
 
-            elif self.state() == MachineState.BUSY:
-                if self._take_reschedule_request():
-                    delay = self.controller._handle_scheduler_idle()
-                    if delay is None:
-                        # robobs is off (or shutting down): stay put
-                        continue
-                    if delay > 0:
-                        log.debug("[busy] retrying in %.0f s...", delay)
-                        self._sleep(timeout=delay)
-                        if self.state() == MachineState.BUSY:
-                            self.request_reschedule()
-                        continue
-                    self.state(MachineState.START)
-                else:
-                    log.debug("[busy] waiting for something to happen..")
-                    self._sleep()
+            elif self._take_reschedule_request():
+                # OFF or BUSY with pending work (the legacy event handler
+                # reacted regardless of the machine state)
+                delay = self.controller._handle_scheduler_idle()
+                if delay is None:
+                    # robobs is off (or shutting down): stay put
+                    continue
+                if delay > 0:
+                    log.debug("retrying in %.0f s...", delay)
+                    self._sleep(timeout=delay)
+                    if self.state() in (MachineState.OFF, MachineState.BUSY):
+                        self.request_reschedule()
+                    continue
+                self.state(MachineState.START)
+
+            else:
+                log.debug("[%s] waiting for something to happen..", self.state().value)
+                self._sleep()
 
         log.debug("[shutdown] thread ending...")
 
