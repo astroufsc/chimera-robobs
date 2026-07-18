@@ -27,6 +27,9 @@ observing_blocks:
     pid: P01
     max_airmass: 5.0
     scheduling_algorithm: higher
+
+scheduling:
+  slot_len: 3600.0
 """
 
 TARGETS_CSV = """\
@@ -237,3 +240,28 @@ def test_pair_observing_log_marks_aborted(tmp_path):
     assert [p["aborted"] for p in programs] == [True, False, True]
     assert programs[0]["end"] == entries[1].time  # closed at the next start
     assert programs[2]["end"] == entries[3].time + dt.timedelta(minutes=1)
+
+
+def test_pid_config_overrides_stored_scheduling(populated, fake_connect, tmp_path):
+    """--pid-config is a per-night override on top of the project's stored
+    scheduling section."""
+    db = populated
+    override = tmp_path / "override.yaml"
+    # the stored scheduling (slot_len 3600) schedules both targets; the
+    # override caps the run at a single block
+    override.write_text("max_sched_blocks: 1\n")
+
+    assert (
+        _run(
+            db,
+            "make-queue",
+            "--pid",
+            "P01",
+            "--pid-config",
+            str(override),
+            *_window_args(),
+        )
+        == 0
+    )
+    session = _session(db)
+    assert session.query(model.Program).count() == 1

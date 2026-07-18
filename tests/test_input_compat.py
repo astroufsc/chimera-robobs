@@ -319,3 +319,32 @@ def test_past_meridian_only_is_a_supported_key(db, tmp_path, capsys):
 
     captured = capsys.readouterr()
     assert "past_meridian_only" not in captured.err
+
+
+def test_project_scheduling_section_stored_and_used(db, tmp_path, capsys):
+    """The pid-config keys can live in the project file (scheduling:); the
+    stored section is the make-queue default and --pid-config overrides it
+    per key."""
+    import json
+
+    assert _run(db, "add-project", "-f", _data("canonical_proj.yaml")) == 0
+    session = _session(db)
+    project = session.query(model.Project).one()
+    stored = json.loads(project.scheduling)
+    assert stored == {"slot_len": 900.0, "recurrence": 3}
+
+    # re-ingesting without a scheduling section keeps the stored one
+    plain = tmp_path / "plain.yaml"
+    plain.write_text(open(_data("canonical_proj.yaml")).read().split("scheduling:")[0])
+    assert _run(db, "add-project", "-f", str(plain)) == 0
+    session = _session(db)
+    assert json.loads(session.query(model.Project).one().scheduling) == stored
+
+    # unknown scheduling keys reject the file whole
+    bad = tmp_path / "bad.yaml"
+    bad.write_text(
+        open(_data("canonical_proj.yaml")).read() + "  not_a_scheduling_key: 1\n"
+    )
+    capsys.readouterr()
+    assert _run(db, "add-project", "-f", str(bad)) == 1
+    assert "not_a_scheduling_key" in capsys.readouterr().err

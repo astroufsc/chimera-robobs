@@ -271,6 +271,10 @@ class Project(Base):
     abstract = Column(Text, default="")
     url = Column(String, default="")
     priority = Column(Integer, default=0)
+    # scheduling-algorithm parameters (slot_len, recurrence, times, ...)
+    # from the project file's ``scheduling:`` section, stored as JSON;
+    # make-queue uses them as the per-project defaults
+    scheduling = Column(Text, default=None)
 
     def __str__(self):
         # legacy __str__ referenced the non-existent self.flag

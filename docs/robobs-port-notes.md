@@ -192,3 +192,11 @@ readable name (`higher`/`extinction_monitor`/`timed`/`recurrent`/
 with unknown keys are rejected whole); the standalone
 `scripts/migrate_legacy_config.py` converts legacy files once.  The
 `EPOC` CSV header remains accepted.
+
+## Scheduling section merged into the project file (2026-07)
+
+The standalone `_pid.yaml` files were historical (a make-queue runtime
+argument): the project file now carries an optional `scheduling:` section
+(same keys) stored with the project (`projects.scheduling`, JSON) and used
+as the make-queue default; `--pid-config` remains as a per-key, per-night
+override.

@@ -18,3 +18,6 @@ observing_blocks:
     cloud_cover: 1
     scheduling_algorithm: recurrent
     apply_ext_corr: false
+scheduling:
+  slot_len: 900.0
+  recurrence: 3

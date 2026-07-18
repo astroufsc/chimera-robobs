@@ -33,6 +33,7 @@ converted once with ``scripts/migrate_legacy_config.py``.
 
 import argparse
 import datetime as dt
+import json
 import logging
 import math
 import os
@@ -195,6 +196,17 @@ def upsert_project(session, config) -> Project:
         _out(f"-Adding {pid} to the database ...")
         project = Project(pid=pid, pi=pi, abstract=abstract, url=url, priority=priority)
         session.add(project)
+
+    # scheduling-algorithm parameters: stored with the project and used as
+    # the make-queue defaults (the separate --pid-config file becomes a
+    # per-night override).  An absent section leaves any stored one as is.
+    if "scheduling" in config:
+        scheduling = config["scheduling"] or {}
+        unknown = set(scheduling) - (PID_CONFIG_KEYS - {"pid"})
+        if unknown:
+            raise ValueError(f"unknown scheduling keys {sorted(unknown)}")
+        _out(f"-Scheduling parameters: {scheduling}")
+        project.scheduling = json.dumps(scheduling)
 
     _out("-Reading observing block information...")
 
@@ -1078,10 +1090,13 @@ def cmd_make_queue(args) -> int:
         session.commit()
         return 0
 
-    pgrconfig = {}
+    # scheduling parameters: the project's stored ``scheduling:`` section is
+    # the default; a --pid-config file overrides per key (per-night knobs)
+    project_row = session.query(Project).filter(Project.pid == args.pid).one()
+    pgrconfig = json.loads(project_row.scheduling) if project_row.scheduling else {}
     if args.pid_config is not None:
         try:
-            pgrconfig = _load_yaml(args.pid_config)
+            pgrconfig.update(_load_yaml(args.pid_config) or {})
         except yaml.YAMLError as exc:
             _err(str(exc))
             return 1

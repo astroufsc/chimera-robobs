@@ -90,15 +90,21 @@ observing_blocks:
     max_seeing: 1.5
     scheduling_algorithm: recurrent   # higher | extinction_monitor | timed
                                       # | recurrent | time_sequence
+
+scheduling:            # parameters of the scheduling algorithm, stored
+  slot_len: 900.0      # with the project and used by make-queue
+  recurrence: 3
 ```
 
 Block files use `pre_actions:` (before the slew to the target) and
 `post_actions:` (after it) with snake_case action keys (`image_type`,
-`object_name`, ...); pid-config files use `slot_len`, `n_stars`,
+`object_name`, ...).  The `scheduling:` keys are `slot_len`, `n_stars`,
 `n_airmass`, `pool_size`, `recurrence`, `times`, `past_meridian_only`
 (restrict the Higher-family selection to targets that already crossed the
-meridian — pier-flip avoidance on German equatorial mounts).  Files with
-unknown keys are rejected whole (never half-loaded).
+meridian — pier-flip avoidance on German equatorial mounts); the same keys
+in a separate YAML passed as `make-queue --pid-config` override the stored
+section per key (per-night knobs, e.g. changing the focus `times`).
+Files with unknown keys are rejected whole (never half-loaded).
 
 Legacy-dialect files (`schedalgorith: 3`, `maxairmass`, `imageType`,
 `pos-actions`, `slotLen`, ...) are **not** accepted by the CLI; convert
