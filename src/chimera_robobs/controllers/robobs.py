@@ -94,9 +94,18 @@ class Machine(threading.Thread):
 
         while self.state() != MachineState.SHUTDOWN:
             if self.state() == MachineState.START:
+                if self.controller.rob_state != RobState.ON:
+                    # never start the scheduler with robobs off: it would
+                    # replay stale queued programs
+                    log.debug("[start] robobs is off, not waking the scheduler")
+                    self.state(MachineState.OFF)
+                    continue
                 log.debug("[start] waking scheduler...")
                 sched.start()
                 self.state(MachineState.BUSY)
+                # an empty freshly-started scheduler never emits the idle
+                # event this machine waits for: force one planning pass
+                self.request_reschedule()
 
             elif self._take_reschedule_request():
                 # OFF or BUSY with pending work (the legacy event handler
@@ -255,6 +264,10 @@ class RobObs(ChimeraObject):
     def stop(self) -> bool:
         self.log.debug("Switching robstate off...")
         self.rob_state = RobState.OFF
+        # pending programs must not survive the stop, or a later scheduler
+        # start resurrects them
+        if self["clean_scheduler_on_start"]:
+            self._clean_scheduler_queue()
         return True
 
     def wake(self) -> bool:
@@ -363,6 +376,20 @@ class RobObs(ChimeraObject):
                     rsession,
                     program,
                     f"ROBOBS: Program End with status {status}({message})",
+                )
+                rsession.commit()
+            elif self._current_program is not None:
+                # on success the scheduler deletes its row before this event
+                # arrives: log the End from the robobs program instead
+                robobs_program = rsession.merge(self._current_program[0])
+                rsession.add(
+                    ObservingLog(
+                        time=datetime_from_mjd(self._site.mjd()).replace(tzinfo=None),
+                        target_id=robobs_program.target_id,
+                        name=robobs_program.name,
+                        priority=robobs_program.priority,
+                        action=f"ROBOBS: Program End with status {status}({message})",
+                    )
                 )
                 rsession.commit()
 

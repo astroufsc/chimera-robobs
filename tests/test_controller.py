@@ -107,6 +107,15 @@ def test_machine_start_walk(rob):
     rob.machine.start()
     try:
         assert rob.machine.state() == MachineState.OFF
+
+        # a wake with robobs OFF must NOT start the chimera scheduler:
+        # it would replay stale queued programs (the 2026-07-20 daytime
+        # exposures with the dome closed)
+        rob.wake()
+        assert _wait_for(lambda: rob.machine.state() == MachineState.OFF)
+        assert "start" not in rob._fake_scheduler.calls
+
+        rob.rob_state = RobState.ON
         rob.wake()
         assert _wait_for(lambda: "start" in rob._fake_scheduler.calls)
         assert _wait_for(lambda: rob.machine.state() == MachineState.BUSY)
