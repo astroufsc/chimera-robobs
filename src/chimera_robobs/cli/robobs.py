@@ -1067,9 +1067,25 @@ def cmd_clean_queue(args) -> int:
 
 
 def make_times(args, site: SiteAdapter) -> SimpleNamespace:
-    """Determine the start/end times of the night (legacy ``mktimes``)."""
-    obs_start = site.sunset_twilight_end()
-    obs_end = site.sunrise_twilight_begin(obs_start)
+    """Determine the start/end times of the night (legacy ``mktimes``).
+
+    The default window is the night after *today's* evening twilight — which,
+    past UTC midnight, silently jumps to the NEXT night and orphans the one
+    in progress.  ``--tonight`` resolves the CURRENT night instead: from now
+    (if already dark) or the coming evening twilight, to the morning twilight
+    that ends it.
+    """
+    if getattr(args, "tonight", False):
+        now = site.ut()
+        obs_start = site.sunset_twilight_end(now)  # next evening twilight
+        obs_end = site.sunrise_twilight_begin(now)  # next morning twilight
+        if obs_end < obs_start:
+            # the morning twilight comes first: we are inside a night —
+            # schedule the remainder of it, starting now
+            obs_start = now
+    else:
+        obs_start = site.sunset_twilight_end()
+        obs_end = site.sunrise_twilight_begin(obs_start)
 
     if getattr(args, "jd_start", None):
         obs_start = datetime_from_jd(args.jd_start)
@@ -1514,6 +1530,13 @@ def cmd_monitor(args) -> int:
 
 
 def _add_time_options(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--tonight",
+        action="store_true",
+        help="use the CURRENT night (from now, if already dark) instead of "
+        "the night after today's evening twilight - after UTC midnight the "
+        "default jumps to the next night",
+    )
     parser.add_argument(
         "--jd-start",
         type=float,
