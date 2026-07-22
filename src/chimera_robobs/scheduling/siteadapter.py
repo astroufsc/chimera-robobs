@@ -77,6 +77,25 @@ class SiteAdapter:
             return ensure_datetime(self._site.sunrise())
         return ensure_datetime(self._site.sunrise(self._date_arg(date)))
 
+    def sun_altitude(self, date: dt.datetime | None = None) -> float:
+        """Sun altitude in DEGREES.
+
+        Site.sunpos() is not consistent across chimera versions: some
+        return ``(alt, az)`` in degrees, others a ``Position`` (whose
+        ``.alt`` is degrees but which also unpacks). Normalise it here so
+        no caller has to guess — guessing wrong is what pinned every
+        twilight flat at exptime_max on 2026-07-21.
+        """
+        if date is None:
+            position = self._site.sunpos()
+        else:
+            position = self._site.sunpos(self._date_arg(date))
+
+        altitude = getattr(position, "alt", None)
+        if altitude is None:
+            altitude = position[0]
+        return float(altitude)
+
     # -- coordinates ----------------------------------------------------
     def ra_dec_to_alt_az(
         self, ra_hours: float, dec_deg: float, lst_in_rads: float

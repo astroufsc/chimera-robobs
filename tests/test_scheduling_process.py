@@ -4,6 +4,7 @@
 """Slot-allocation (process()) tests for the scheduling algorithms."""
 
 import datetime as dt
+import json
 import math
 
 import pytest
@@ -803,3 +804,256 @@ def test_timed_next_bound_expires_on_failed_check(session_factory, site):
     assert bound_row.observed_at == 0.0  # expired, never ran
     assert chosen is not None
     assert chosen[0].slew_at == pytest.approx(61000.30)
+
+
+def _add_project(session, pid, scheduling):
+    session.add(model.Project(pid=pid, scheduling=json.dumps(scheduling)))
+    session.commit()
+
+
+def test_timed_skips_candidates_east_of_the_meridian(session_factory):
+    """past_meridian_only is applied by Higher at each SLOT's LST, but the
+    winning candidate is re-timed to the occurrence. Without a re-check the
+    night's first focus was scheduled 1.4 h BEFORE the meridian - a pier
+    flip mid-run on a GEM."""
+    # LST 9 h, target at RA 10 h -> hour angle -1 h: still rising
+    site = FakeSite(latitude=0.0, lst_rads=9.0 * math.pi / 12.0)
+    factory = session_factory
+    row = _timed_setup(factory, site, [0.0], expire_overdue=False)
+    _add_project(factory(), "P01", {"past_meridian_only": True})
+    timed = build_algorithms(factory, site)[2]
+
+    assert timed.next(site.mjd(), [row]) is None
+
+
+def test_timed_accepts_candidates_past_the_meridian(session_factory):
+    """Control: the same target once it has crossed."""
+    # LST 11 h, target at RA 10 h -> hour angle +1 h
+    site = FakeSite(latitude=0.0, lst_rads=11.0 * math.pi / 12.0)
+    factory = session_factory
+    row = _timed_setup(factory, site, [0.0], expire_overdue=False)
+    _add_project(factory(), "P01", {"past_meridian_only": True})
+    timed = build_algorithms(factory, site)[2]
+
+    assert timed.next(site.mjd(), [row]) is not None
+
+
+def test_timed_past_meridian_only_off_keeps_rising_targets(session_factory):
+    """Without the option a rising target is still selectable."""
+    site = FakeSite(latitude=0.0, lst_rads=9.0 * math.pi / 12.0)
+    factory = session_factory
+    row = _timed_setup(factory, site, [0.0], expire_overdue=False)
+    _add_project(factory(), "P01", {})
+    timed = build_algorithms(factory, site)[2]
+
+    assert timed.next(site.mjd(), [row]) is not None
+
+
+def test_timed_run_duration_does_not_expire_the_next_occurrence(session_factory):
+    """min_gap is the FULL nominal spacing and observed_at is recorded at
+    completion, so any run duration used to push the boundary past the next
+    occurrence - silently halving the cadence (6 focus requests 2 h apart,
+    3 served)."""
+    site = FakeSite(latitude=0.0, lst_rads=10.0 * math.pi / 12.0)
+    factory = session_factory
+    row = _timed_setup(factory, site, [0.0, 2.0], expire_overdue=True)
+
+    row[2].length = 613.0  # a real focus block
+    block_days = 613.0 / 86400.0
+
+    timed = build_algorithms(factory, site)[2]
+    now = site.mjd()
+
+    # the first occurrence runs on time and takes the block's length
+    assert timed.next(now, [row]) is not None
+    timed.observed(now + block_days, row, soft=True)
+
+    # the 2 h occurrence is only a run-duration late: it must survive
+    chosen = timed.next(now + 2.0 / 24.0, [row])
+    assert chosen is not None
+    assert chosen[0].slew_at == pytest.approx(now + 2.0 / 24.0)
+
+
+def test_timed_does_not_expire_future_occurrences(session_factory):
+    """next() walks pending occurrences in time order, so an occurrence
+    hours away gets tested against today's queue. Expiring it there burned
+    5 of 6 focus runs in one night."""
+    # LST 9 h vs target RA 10 h: rising, so past_meridian_only rejects it
+    site = FakeSite(latitude=0.0, lst_rads=9.0 * math.pi / 12.0)
+    factory = session_factory
+    row = _timed_setup(factory, site, [4.0], expire_overdue=False)
+    _add_project(factory(), "P01", {"past_meridian_only": True})
+    timed = build_algorithms(factory, site)[2]
+
+    # asked 4 h before the occurrence is due
+    assert timed.next(site.mjd(), [row]) is None
+
+    session = factory()
+    request = session.query(model.TimedDB).one()
+    assert not request.finished, "a future occurrence must stay pending"
+
+
+def test_timed_expires_overdue_unservable_occurrence(session_factory):
+    """The wedge guard still applies once the occurrence is actually due."""
+    site = FakeSite(latitude=0.0, lst_rads=9.0 * math.pi / 12.0)
+    factory = session_factory
+    row = _timed_setup(factory, site, [0.0], expire_overdue=False)
+    _add_project(factory(), "P01", {"past_meridian_only": True})
+    timed = build_algorithms(factory, site)[2]
+
+    assert timed.next(site.mjd() + 1.0 / 24.0, [row]) is None
+
+    session = factory()
+    request = session.query(model.TimedDB).one()
+    assert request.finished, "an overdue unservable occurrence must expire"
+
+
+def test_skyflat_not_offered_in_the_deep_night(session_factory):
+    """The engine waived EVERY condition for twilight calibrations, so sky
+    flats looked observable at sun -46 deg: robobs served them ahead of
+    everything, the telescope slewed to the flat position, and the sky-flat
+    controller only then declined. Twelve round trips in one night."""
+    from chimera_robobs.scheduling.siteadapter import SiteAdapter
+
+    site = SiteAdapter(FakeSite(latitude=0.0, sun_alt=-46.5))
+    algorithms = build_algorithms(session_factory, site)
+    assert not algorithms[5].in_twilight_window(site.mjd())
+
+
+def test_skyflat_offered_during_twilight(session_factory):
+    """Control: inside the coarse window it is still offered."""
+    from chimera_robobs.scheduling.siteadapter import SiteAdapter
+
+    for sun_alt in (-4.0, -12.0, -19.0):
+        site = SiteAdapter(FakeSite(latitude=0.0, sun_alt=sun_alt))
+        algorithms = build_algorithms(session_factory, site)
+        assert algorithms[5].in_twilight_window(site.mjd()), f"sun {sun_alt}"
+
+
+def test_site_adapter_normalises_sun_altitude():
+    """Site.sunpos() returns a tuple on some cores and a Position on others."""
+    from chimera_robobs.scheduling.siteadapter import SiteAdapter
+
+    class TupleSite:
+        def sunpos(self, date=None):
+            return -8.25, 130.0
+
+    class PositionSite:
+        class _Pos:
+            alt = -8.25
+
+        def sunpos(self, date=None):
+            return self._Pos()
+
+    assert SiteAdapter(TupleSite()).sun_altitude() == pytest.approx(-8.25)
+    assert SiteAdapter(PositionSite()).sun_altitude() == pytest.approx(-8.25)
+
+
+def test_unobservable_top_priority_does_not_hide_alternates(session_factory):
+    """A reference program that cannot be observed must not veto the queue.
+
+    The highest-priority program was only condition-checked at the END of
+    reschedule(), which returned None on failure - discarding alternates
+    already validated. Live on 2026-07-22: a CAL sky flat outside its
+    twilight window became the reference (slew_at in the past, so waittime
+    0) and every focus run was found "Target OK" and then thrown away.
+    """
+    site = FakeSite(latitude=0.0, lst_rads=10.0 * math.pi / 12.0, sun_alt=-46.0)
+    factory = session_factory
+    session = factory()
+
+    # a CAL sky-flat block (higher priority) and an ordinary target
+    flat = _add_block(session, ra_hours=10.0, blockid=1, pid="CAL", sched_algorithm=5)
+    good = _add_block(session, ra_hours=10.0, blockid=2, pid="P01", sched_algorithm=0)
+    for pid, block, priority in (("CAL", flat, 1), ("P01", good, 2)):
+        target = (
+            session.query(model.Target).filter(model.Target.id == block.target_id).one()
+        )
+        session.add(
+            model.Program(
+                target_id=target.id,
+                name=target.name,
+                priority=priority,
+                slew_at=site.mjd() - 0.01,  # in the past: waittime 0
+                pid=pid,
+                obsblock_id=block.id,
+                blockpar_id=block.block_par_id,
+            )
+        )
+    session.commit()
+
+    from chimera_robobs.scheduling.engine import RobObsEngine
+
+    engine = RobObsEngine(factory, site, algorithms=build_algorithms(factory, site))
+    chosen = engine.reschedule()
+
+    assert chosen is not None, "the observable alternate was discarded"
+    assert chosen[0].pid == "P01"
+
+
+def test_timed_offer_is_free_but_commit_consumes(session_factory):
+    """next() is a peek; only committed() consumes the occurrence.
+
+    The engine polls every priority queue while choosing a program, so a
+    next() that consumed on offer lost one occurrence per poll FOCUS did
+    not win - six focus occurrences eaten in six reschedules on
+    2026-07-22, none executed, and the night plan showed no focus at all.
+    """
+    site = FakeSite(latitude=0.0, lst_rads=10.0 * math.pi / 12.0)
+    factory = session_factory
+    row = _timed_setup(factory, site, [0.0, 2.0], expire_overdue=False)
+    timed = build_algorithms(factory, site)[2]
+    now = site.mjd()
+
+    # three polls without a commit: the SAME occurrence is offered each
+    # time and nothing is consumed
+    offers = [timed.next(now, [row]) for _ in range(3)]
+    assert all(o is not None for o in offers)
+    # the same row object is re-timed in place: capture the value per poll
+    slews = [timed.next(now, [row])[0].slew_at for _ in range(2)]
+    first_slew = slews[-1]
+    assert len(set(slews)) == 1, f"peeks consumed occurrences: {slews}"
+
+    session = factory()
+    assert (
+        session.query(model.TimedDB)
+        .filter(model.TimedDB.scheduled == True)  # noqa: E712
+        .count()
+        == 0
+    ), "a peek consumed an occurrence"
+
+    # the engine takes the offer: NOW it is consumed and the next poll
+    # advances to the following occurrence
+    timed.committed(offers[-1])
+    after = timed.next(now, [row])
+    assert after is not None
+    assert after[0].slew_at != first_slew
+    assert (
+        session.query(model.TimedDB)
+        .filter(model.TimedDB.scheduled == True)  # noqa: E712
+        .count()
+        == 1
+    )
+
+    # both consumed: nothing left
+    timed.committed(after)
+    assert timed.next(now, [row]) is None
+
+
+def test_soft_clean_resets_scheduled(session_factory):
+    """A re-simulation must not start with every occurrence already served."""
+    site = FakeSite(latitude=0.0, lst_rads=10.0 * math.pi / 12.0)
+    factory = session_factory
+    row = _timed_setup(factory, site, [0.0, 2.0], expire_overdue=False)
+    timed = build_algorithms(factory, site)[2]
+
+    assert timed.next(site.mjd(), [row]) is not None
+    timed.soft_clean("P01")
+
+    session = factory()
+    assert (
+        session.query(model.TimedDB)
+        .filter(model.TimedDB.scheduled == True)  # noqa: E712
+        .count()
+        == 0
+    )

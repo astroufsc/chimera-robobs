@@ -88,8 +88,28 @@ class BaseScheduleAlgorithm:
         """
         raise NotImplementedError()
 
+    def committed(self, program):
+        """The engine COMMITTED to this program (it will be handed over).
+
+        next() must stay side-effect free: the engine polls every priority
+        queue while choosing, and an algorithm that consumes state on a
+        mere offer loses one entry per poll it does not win (2026-07-22:
+        six focus occurrences eaten in six reschedules, none executed).
+        """
+
     def observed(self, time, program, soft=False):
         """Process a program as observed."""
+
+    def in_twilight_window(self, time: float) -> bool:
+        """Whether a twilight-calibration program is worth starting at ``time``.
+
+        Only consulted for :attr:`twilight_calibration` algorithms. It is a
+        COARSE gate: the precise sun-altitude window belongs to the sky-flat
+        controller. Without it the engine waived every condition at any hour,
+        so flats were scheduled in the middle of the night, the telescope
+        slewed to the flat position, and the controller only then declined.
+        """
+        return True
 
     def is_hard_timed(self, program) -> bool:
         """Whether ``program``'s scheduled time is immovable.

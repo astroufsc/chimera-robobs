@@ -134,7 +134,9 @@ def test_chimera_program_conversion(session_factory):
     assert isinstance(cprogram, CProgram)
     assert cprogram.tid == target.id
     assert cprogram.name == "NGC0001"
-    assert cprogram.priority == 1
+    # negated: robobs runs lowest-number first, chimera's sequential
+    # scheduler runs highest first - a verbatim copy inverted the night order
+    assert cprogram.priority == -1
     assert cprogram.start_at == 61000.5
     assert len(cprogram.actions) == 3
     assert isinstance(cprogram.actions[0], CPoint)

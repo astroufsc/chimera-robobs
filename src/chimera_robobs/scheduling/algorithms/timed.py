@@ -21,18 +21,23 @@ selected program's ``slew_at``.
 """
 
 import datetime as dt
+import json
 import logging
+import math
 
 import numpy as np
+from chimera.util.position import Position
+from sqlalchemy import or_
 
 from chimera_robobs.scheduling.algorithms.base import TimedError
 from chimera_robobs.scheduling.algorithms.higher import SLOT_DTYPE, Higher
 from chimera_robobs.scheduling.dates import (
     MJD_JD_OFFSET,
     SECONDS_PER_DAY,
+    datetime_from_jd,
     jd_from_datetime,
 )
-from chimera_robobs.scheduling.model import TimedDB
+from chimera_robobs.scheduling.model import Project, TimedDB
 
 log = logging.getLogger(__name__)
 
@@ -192,14 +197,50 @@ class Timed(Higher):
         finally:
             session.commit()
 
+    def _past_meridian_only(self, session, pid):
+        """``past_meridian_only`` from the project's ``scheduling`` JSON.
+
+        next() has no config argument, and the option is enforced by the
+        Higher selection at each SLOT's LST — which is not the LST the
+        occurrence actually runs at.  Read it back here so the re-timed
+        candidate can be re-checked.
+        """
+        project = session.query(Project).filter(Project.pid == pid).first()
+        if project is None or not project.scheduling:
+            return False
+        try:
+            return bool(json.loads(project.scheduling).get("past_meridian_only", False))
+        except (ValueError, AttributeError):
+            log.warning("could not parse scheduling JSON of project %s", pid)
+            return False
+
+    def _is_past_meridian(self, row, at_mjd):
+        """True if the row's target has crossed the meridian at ``at_mjd``."""
+        position = Position.from_ra_dec(row[3].target_ra, row[3].target_dec)
+        lst = self.site.lst_in_rads(datetime_from_jd(at_mjd + MJD_JD_OFFSET))
+        # folded to [0, 2pi): (0, pi) means past the meridian and setting
+        hour_angle = (lst - position.ra.radian) % (2.0 * math.pi)
+        return 0.0 < hour_angle < math.pi
+
     def next(self, now_mjd, programs, check=None):
         session = self.session()
 
         try:
             pid = programs[0][0].pid
+            # scheduled == False matters as much as finished == False: an
+            # occurrence stays unfinished until the program actually runs,
+            # and robobs asks for the next program as soon as it has handed
+            # the previous one to the chimera scheduler. Without this the
+            # SAME occurrence was served over and over - 13 focus programs
+            # queued in one second on 2026-07-22, all executed back to back
+            # instead of one every two hours.
             pending = (
                 session.query(TimedDB)
-                .filter(TimedDB.finished == False, TimedDB.pid == pid)  # noqa: E712
+                .filter(
+                    TimedDB.finished == False,  # noqa: E712
+                    TimedDB.scheduled == False,  # noqa: E712
+                    TimedDB.pid == pid,
+                )
                 .order_by(TimedDB.execute_at)
                 .all()
             )
@@ -218,12 +259,21 @@ class Timed(Higher):
             )
             last_run_at = last_run.observed_at if last_run is not None else None
 
+            # An occurrence must not be expired just because the previous run
+            # took time to execute: min_gap is the FULL nominal spacing, so
+            # with observed_at recorded at completion, any duration at all
+            # pushed the boundary past the next occurrence and silently
+            # halved the cadence (seen live: 6 focus requests 2 h apart, 3
+            # served). Discount the block's own length from the boundary.
+            block_length_days = (programs[0][2].length or 0.0) / SECONDS_PER_DAY
+
             timed_observation = None
             for request in pending:
                 if (
                     request.min_gap
                     and last_run_at is not None
-                    and request.execute_at < last_run_at + request.min_gap
+                    and request.execute_at
+                    < last_run_at + request.min_gap - block_length_days
                 ):
                     # expire_overdue: the previous occurrence ran into this
                     # one's window (it executed late) — skip it instead of
@@ -292,8 +342,22 @@ class Timed(Higher):
             candidates = sorted(
                 programs[:], key=lambda row: abs(now_mjd - row[0].slew_at)
             )
+            past_meridian_only = self._past_meridian_only(session, pid)
             program_list = None
             for row in candidates:
+                # Higher applied past_meridian_only at the SLOT's LST, but
+                # the candidate is about to be re-timed to execute_at below.
+                # Without this it schedules targets still east of the
+                # meridian - a pier flip mid-run on a GEM (seen live: the
+                # first focus of the night 1.4 h before the meridian).
+                if past_meridian_only and not self._is_past_meridian(row, execute_at):
+                    log.info(
+                        "Timed candidate %s is still east of the meridian @ "
+                        "%.3f; trying the next one.",
+                        row[0],
+                        execute_at,
+                    )
+                    continue
                 if check is None or check(row, execute_at, row[2].length or 0.0):
                     program_list = row
                     break
@@ -303,11 +367,29 @@ class Timed(Higher):
                     execute_at,
                 )
             if program_list is None:
+                if execute_at > now_mjd:
+                    # NOT DUE YET. next() walks pending occurrences in time
+                    # order, so this is routinely a request hours away being
+                    # tested against a queue that will have changed by then -
+                    # expiring it here burned 5 of 6 focus runs in one night.
+                    log.debug(
+                        "No candidate for the %.3f occurrence yet (due in "
+                        "%.1f min); leaving it pending.",
+                        execute_at,
+                        (execute_at - now_mjd) * 24.0 * 60.0,
+                    )
+                    return None
+                # Due or overdue: every condition is a function of the FIXED
+                # execute_at, so it will fail identically at every later
+                # poll. Expire it, or the whole project wedges behind it and
+                # loses the night's remaining runs.
                 log.warning(
-                    "No timed candidate observable @ %.3f (%i tried).",
+                    "No timed candidate observable @ %.3f (%i tried). "
+                    "Expiring the occurrence.",
                     execute_at,
                     len(candidates),
                 )
+                timed_observation.finished = True
                 return None
 
             # Replace the slot slew time with the requested execution time —
@@ -318,6 +400,12 @@ class Timed(Higher):
 
             timed_observation.target_id = program_list[0].target_id
             timed_observation.block_id = program_list[2].id
+            # OFFER only: stamp which occurrence this program serves and
+            # leave it pending. The engine polls every priority queue while
+            # choosing, so consuming here lost one occurrence per poll that
+            # FOCUS did not win. committed() consumes it if the engine
+            # actually takes the program.
+            program_list[0]._timed_request_id = timed_observation.id
 
             return program_list
         finally:
@@ -342,6 +430,23 @@ class Timed(Higher):
         finally:
             session.commit()
 
+    def committed(self, program):
+        """Consume the offered occurrence: the program is being handed over.
+
+        If the program never actually runs the occurrence is simply lost,
+        which is the intended "skip it" behaviour - it is not re-offered.
+        """
+        request_id = getattr(program[0], "_timed_request_id", None)
+        if request_id is None:
+            return
+        session = self.session()
+        try:
+            request = session.query(TimedDB).get(request_id)
+            if request is not None:
+                request.scheduled = True
+        finally:
+            session.commit()
+
     def observed(self, time, program, soft=False):
         session = self.session()
 
@@ -353,17 +458,28 @@ class Timed(Higher):
             if not soft:
                 block.last_observation = self.site.ut().replace(tzinfo=None)
 
-            timed_observation = (
-                session.query(TimedDB)
-                .filter(
-                    TimedDB.pid == prog.pid,
-                    TimedDB.block_id == block.id,
-                    TimedDB.target_id == prog.target_id,
-                    TimedDB.finished == False,  # noqa: E712
-                )
-                .order_by(TimedDB.execute_at)
-                .first()
+            # prefer the occurrence stamped at offer time: the fallback
+            # lookup below trusts block/target ids that reloads may remap
+            request_id = getattr(prog, "_timed_request_id", None) or getattr(
+                program[0], "_timed_request_id", None
             )
+            timed_observation = (
+                session.query(TimedDB).get(request_id) if request_id else None
+            )
+            if timed_observation is not None and timed_observation.finished:
+                timed_observation = None
+            if timed_observation is None:
+                timed_observation = (
+                    session.query(TimedDB)
+                    .filter(
+                        TimedDB.pid == prog.pid,
+                        TimedDB.block_id == block.id,
+                        TimedDB.target_id == prog.target_id,
+                        TimedDB.finished == False,  # noqa: E712
+                    )
+                    .order_by(TimedDB.execute_at)
+                    .first()
+                )
 
             if timed_observation is not None:
                 timed_observation.finished = True
@@ -380,11 +496,15 @@ class Timed(Higher):
         try:
             timed_observations = session.query(TimedDB).filter(
                 TimedDB.pid == pid,
-                TimedDB.finished == True,  # noqa: E712
+                or_(
+                    TimedDB.finished == True,  # noqa: E712
+                    TimedDB.scheduled == True,  # noqa: E712
+                ),
             )
 
             for timed in timed_observations:
                 timed.finished = False
+                timed.scheduled = False
                 # forget actual run times too, or a re-simulation would
                 # expire occurrences against the previous night's runs
                 timed.observed_at = 0.0

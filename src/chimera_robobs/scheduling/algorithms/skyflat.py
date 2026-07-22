@@ -43,10 +43,21 @@ import numpy as np
 
 from chimera_robobs.scheduling.algorithms.base import BaseScheduleAlgorithm
 from chimera_robobs.scheduling.algorithms.higher import SLOT_DTYPE
-from chimera_robobs.scheduling.dates import datetime_from_jd, jd_from_datetime
+from chimera_robobs.scheduling.dates import (
+    datetime_from_jd,
+    datetime_from_mjd,
+    jd_from_datetime,
+)
 from chimera_robobs.scheduling.model import AutoFlat, SkyFlatDB
 
 log = logging.getLogger(__name__)
+
+#: Coarse sun-altitude gate for offering flats at all, in degrees. The
+#: precise window is the sky-flat controller's (sun_alt_hi/sun_alt_low);
+#: these bounds are deliberately wider so the controller stays
+#: authoritative, and only exist to keep flats out of the deep night.
+SUN_ALT_HI = 5.0
+SUN_ALT_LOW = -25.0
 
 #: spacing between consecutive flat programs of the same window (seconds);
 #: only fixes the execution order — the actual pace is set by the sky-flat
@@ -64,6 +75,23 @@ class SkyFlat(BaseScheduleAlgorithm):
     default_slot_len = 600.0
     timed_constraint = True
     twilight_calibration = True
+
+    def in_twilight_window(self, time: float) -> bool:
+        """Coarse sun-altitude gate (see the base class).
+
+        Deliberately WIDER than the sky-flat controller's own
+        sun_alt_hi/sun_alt_low: the controller stays authoritative about
+        when a flat is actually worth taking, this only keeps the engine
+        from offering flats in the middle of the night.
+        """
+        if self.site is None:
+            return True
+        try:
+            sun_alt = self.site.sun_altitude(datetime_from_mjd(time))
+        except Exception:
+            log.exception("could not compute the sun altitude; allowing the flat")
+            return True
+        return SUN_ALT_HI >= sun_alt >= SUN_ALT_LOW
 
     def _need_order(self, rows, lookback_days):
         """Rows sorted by how much their filters need flats: fewest ledger
@@ -120,6 +148,16 @@ class SkyFlat(BaseScheduleAlgorithm):
             pool = remaining or by_need  # evening took everything: reuse
             morning_rows = pool[: len(pool) if n_morning is None else int(n_morning)]
 
+        # Need decides WHICH filters get a window; sensitivity must decide
+        # the ORDER within it, or the brightness matching inverts. The
+        # need-order only coincides with sensitivity while the ledger is
+        # empty - with real history it put R at the darkest morning sky and
+        # CLEAR in the brightest (2026-07-22), the exact opposite of what
+        # each filter needs. blockid is the sensitivity ranking (most
+        # sensitive first, by convention of the block list).
+        evening_rows = sorted(evening_rows, key=lambda row: row[0].blockid)
+        morning_rows = sorted(morning_rows, key=lambda row: row[0].blockid)
+
         dusk = obs_start  # the observing window is dusk(-18) -> dawn(-18)
         dawn = obs_end
         slots = []
@@ -161,7 +199,19 @@ class SkyFlat(BaseScheduleAlgorithm):
         """Earliest pending flat program (they execute in slew_at order)."""
         if not programs[:]:
             return None
-        return min(programs, key=lambda row: row[0].slew_at)
+        chosen = min(programs, key=lambda row: row[0].slew_at)
+        # Capture the filters NOW, while the block row is the generation the
+        # program was built from. observed() runs after the flats finish,
+        # and a clean/reload in between reassigns the obsblock ids - the
+        # completion-time lookup then lands on a different filter's block
+        # (2026-07-22: a 9-frame CLEAR set entered the ledger as "I", and
+        # the need-order selection started chasing phantom coverage).
+        chosen[0]._skyflat_ledger = [
+            (act.filter, act.frames or 0)
+            for act in chosen[2].actions
+            if isinstance(act, AutoFlat)
+        ]
+        return chosen
 
     def observed(self, time, program, soft=False):
         session = self.session()
@@ -174,17 +224,26 @@ class SkyFlat(BaseScheduleAlgorithm):
                 now = self.site.ut().replace(tzinfo=None)
                 block.last_observation = now
                 # feed the ledger the selection reads back (production
-                # only: the offline simulation passes soft=True)
-                for act in block.actions:
-                    if isinstance(act, AutoFlat):
-                        session.add(
-                            SkyFlatDB(
-                                pid=prog.pid,
-                                filter=act.filter,
-                                frames=act.frames or 0,
-                                observed_at=now,
-                            )
+                # only: the offline simulation passes soft=True).
+                # Prefer the filters captured by next() at selection time:
+                # resolving block.actions HERE trusts an obsblock id that a
+                # clean/reload may have reassigned to another filter.
+                captured = getattr(program[0], "_skyflat_ledger", None)
+                if captured is None:
+                    captured = [
+                        (act.filter, act.frames or 0)
+                        for act in block.actions
+                        if isinstance(act, AutoFlat)
+                    ]
+                for filter_name, frames in captured:
+                    session.add(
+                        SkyFlatDB(
+                            pid=prog.pid,
+                            filter=filter_name,
+                            frames=frames,
+                            observed_at=now,
                         )
+                    )
         finally:
             session.commit()
 

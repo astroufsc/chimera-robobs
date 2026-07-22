@@ -158,6 +158,22 @@ class RobObsEngine:
 
         waittime = 0.0
 
+        if program is not None and not self.check_conditions(
+            program, max(nowmjd, program[0].slew_at or nowmjd), plen
+        ):
+            # The highest-priority program cannot be observed. Drop it NOW
+            # rather than carry it to the final check at the end of this
+            # method: that returned None outright, discarding alternates
+            # already validated along the way. Live on 2026-07-22, once sky
+            # flats stopped being waived outside their twilight window: a
+            # CAL program with slew_at in the past became the reference,
+            # every focus run was found "Target OK" and then thrown away,
+            # and robobs sat idle all night reporting "No program".
+            self.log.info(
+                "Highest-priority program cannot be observed; trying alternates."
+            )
+            program = None
+
         if program is not None:
             if (not program[0].slew_at) and self.check_conditions(
                 program, nowmjd, plen
@@ -297,11 +313,23 @@ class RobObsEngine:
             target = session.merge(program[3])
             blockpar = session.merge(program[1])
 
-            if self.algorithms[blockpar.sched_algorithm].twilight_calibration:
+            algorithm = self.algorithms[blockpar.sched_algorithm]
+            if algorithm.twilight_calibration:
                 # sky flats: run outside the -18 deg night window on a
                 # placeholder target — none of the night/airmass/moon
                 # checks apply.  The sky-flat controller gates on its own
-                # sun-altitude window (sun_alt_hi/sun_alt_low).
+                # sun-altitude window (sun_alt_hi/sun_alt_low), but only
+                # AFTER it has slewed to the flat position, so the coarse
+                # gate below has to keep us out of the deep night: with the
+                # waiver unconditional, flats looked observable at sun -46
+                # deg and were served ahead of everything else all night,
+                # dragging the telescope to alt 80 az 78 once a minute.
+                if not algorithm.in_twilight_window(time):
+                    self.log.debug(
+                        "Twilight calibration program outside its window @ %.5f.",
+                        time,
+                    )
+                    return False
                 self.log.debug("Twilight calibration program: conditions waived.")
                 return True
 

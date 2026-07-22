@@ -36,6 +36,7 @@ class FakeSite:
         moon_phase: float = 0.2,
         night_length_hours: float = 12.0,
         daytime: bool = False,
+        sun_alt: float = -40.0,
     ):
         self.latitude = latitude
         self._lst = lst_rads
@@ -44,6 +45,7 @@ class FakeSite:
         self._moon_phase = moon_phase
         self._night_length = night_length_hours
         self._daytime = daytime
+        self._sun_alt = sun_alt
 
     def _parse(self, date) -> dt.datetime:
         if date is None:
@@ -65,6 +67,14 @@ class FakeSite:
 
     def lst_in_rads(self, date=None) -> float:
         return self._lst
+
+    def sunpos(self, date=None):
+        """(alt, az) in degrees, like the chimera Site this fakes."""
+        return self._sun_alt, 0.0
+
+    def sun_altitude(self, date=None) -> float:
+        """Degrees, mirroring SiteAdapter.sun_altitude."""
+        return float(self._sun_alt)
 
     def sunset_twilight_end(self, date=None) -> dt.datetime:
         date = self._parse(date)

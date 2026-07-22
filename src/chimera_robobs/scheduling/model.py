@@ -353,7 +353,12 @@ class Program(Base):
         cp.tid = self.target_id
         cp.name = self.name
         cp.pi = self.pi
-        cp.priority = self.priority
+        # robobs priorities run LOWEST first (0, 2, 19, ..., 90); chimera's
+        # SequentialScheduler orders by desc(priority), highest first.
+        # Copying the number verbatim inverted the night: RUP147 (90) cut
+        # ahead of the sky flats (0) and parked the queue for 83 minutes
+        # waiting for its slew time while the twilight drained (2026-07-22).
+        cp.priority = -self.priority
         cp.created_at = self.created_at
         cp.finished = self.finished
         # legacy slewAt/exposeAt were merged into chimera 0.2's start_at
