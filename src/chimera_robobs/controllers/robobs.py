@@ -24,8 +24,6 @@ from chimera.controllers.scheduler.states import State as SchedState
 from chimera.controllers.scheduler.status import SchedulerStatus
 from chimera.core.chimeraobject import ChimeraObject
 from chimera.core.constants import SYSTEM_CONFIG_DIRECTORY
-from chimera.util.coord import Coord
-from chimera.util.position import Position
 
 from chimera_robobs.scheduling.algorithms import build_algorithms
 from chimera_robobs.scheduling.dates import datetime_from_mjd
@@ -35,9 +33,6 @@ from chimera_robobs.scheduling.siteadapter import SiteAdapter
 
 #: how long to wait before retrying when the robobs queue is empty (seconds)
 EMPTY_QUEUE_RETRY = 300.0
-
-#: alt/az the telescope is sent to when there is nothing to observe
-PARK_POSITION_ALT_AZ = (88.0, 89.0)
 
 
 class RobState(enum.Enum):
@@ -146,7 +141,9 @@ class RobObs(ChimeraObject):
     __config__ = {
         "site": "/Site/0",
         "schedulers": "/Scheduler/0",
-        # telescope whose tracking is stopped after each finished program
+        # unused: stopping tracking at program end moved to the Scheduler
+        # (stop_tracking_on_program_end). Kept so deployed configs that still
+        # set it keep loading - chimera raises on an unknown option.
         "telescope": "/Telescope/0",
         "weatherstations": None,
         "seeingmonitors": None,
@@ -232,6 +229,18 @@ class RobObs(ChimeraObject):
         handler.setLevel(logging.DEBUG)
         self.log.setLevel(logging.DEBUG)
         self.log.addHandler(handler)
+
+        # Our modules log under "chimera_robobs.*", a different tree from
+        # chimera's "chimera.*" (whose handlers live on the "chimera"
+        # logger). Nothing bridged them, so every decision the scheduling
+        # algorithms made was invisible in BOTH chimera.log and robobs.log -
+        # notably why a timed occurrence was expired instead of observed,
+        # which had to be reconstructed from the database. Re-parent the
+        # package logger so those records reach the same handlers.
+        package_log = logging.getLogger("chimera_robobs")
+        package_log.parent = self.log
+        package_log.propagate = True
+        package_log.setLevel(logging.DEBUG)
 
     # ------------------------------------------------------------------
     # public control API
@@ -410,29 +419,6 @@ class RobObs(ChimeraObject):
             csession.commit()
             rsession.commit()
 
-        # a finished program must never leave the telescope tracking
-        # indefinitely (it would eventually run into a mount limit).  Run
-        # on its own thread: event watchers execute on the bus dispatch
-        # pool, and issuing bus requests inline there can deadlock it.
-        threading.Thread(
-            target=self._stop_telescope_tracking,
-            name="robobs-tracking-stop",
-            daemon=True,
-        ).start()
-
-    def _stop_telescope_tracking(self):
-        location = self["telescope"]
-        # a string-typed chimera config key coerces None to "None"
-        if not location or str(location).lower() in ("none", ""):
-            return
-        try:
-            telescope = self.get_proxy(str(location).split(",")[0].strip())
-            if telescope.is_tracking():
-                telescope.stop_tracking()
-                self.log.info("Tracking stopped after program completion.")
-        except Exception:
-            self.log.exception("Could not stop telescope tracking.")
-
     def _watch_action_begin(self, action_id, message):
         self.log.debug("Action %s %s ...", action_id, message)
 
@@ -487,6 +473,9 @@ class RobObs(ChimeraObject):
             csession.commit()
             program.finished = True
             session.commit()
+            # tell the algorithm its offer was taken: consumption must not
+            # happen in next() (the engine polls every queue while choosing)
+            self._algorithms[program_info[1].sched_algorithm].committed(program_info)
             self._current_program = program_info
             self._no_program_on_queue = False
             self.log.debug("Done")
@@ -498,18 +487,14 @@ class RobObs(ChimeraObject):
             session.commit()
             return EMPTY_QUEUE_RETRY
         else:
-            self.log.warning(
-                "No program on robobs queue. Sending telescope to park position."
-            )
-            cprog = chimera_model.Program(name="SAFETY", pi="ROBOBS", priority=1)
-            to_park_position = chimera_model.Point()
-            to_park_position.target_alt_az = Position.from_alt_az(
-                Coord.from_d(PARK_POSITION_ALT_AZ[0]),
-                Coord.from_d(PARK_POSITION_ALT_AZ[1]),
-            )
-            cprog.actions.append(to_park_position)
-
-            csession.add(cprog)
+            # An empty queue is not a reason to move the telescope. This used
+            # to enqueue a SAFETY program that pointed at a fixed alt/az park
+            # position, which meant a routine gap between programs dragged the
+            # mount away from the sky and, on any night where nothing was
+            # currently observable, did it once per retry. Parking belongs to
+            # the supervisor's end-of-night items (park_telescope_after_flats,
+            # lock_dome_on_sunrise), which know whether the night is over.
+            self.log.warning("No program on robobs queue.")
             self._no_program_on_queue = True
 
         csession.commit()

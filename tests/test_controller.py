@@ -150,19 +150,25 @@ def test_handle_scheduler_idle_when_off_does_nothing(rob, chimera_session):
     assert chimera_session().query(chimera_model.Program).count() == 0
 
 
-def test_handle_scheduler_idle_empty_queue_parks_then_backs_off(rob, chimera_session):
+def test_handle_scheduler_idle_empty_queue_backs_off_without_moving(
+    rob, chimera_session
+):
+    """An empty queue must not move the telescope.
+
+    This used to enqueue a SAFETY program pointing at a fixed alt/az park
+    position, so a routine gap between programs dragged the mount off the
+    sky - and on a night where nothing was currently observable it did so
+    on every retry. Parking is the supervisor's end-of-night job.
+    """
     rob.rob_state = RobState.ON
 
-    # first time: a SAFETY park program is queued
     assert rob._handle_scheduler_idle() == 0.0
-    csession = chimera_session()
-    safety = csession.query(chimera_model.Program).one()
-    assert safety.name == "SAFETY"
+    assert chimera_session().query(chimera_model.Program).count() == 0
     assert rob._no_program_on_queue is True
 
-    # afterwards: back off instead of stacking park programs
+    # afterwards: simply back off
     assert rob._handle_scheduler_idle() == EMPTY_QUEUE_RETRY
-    assert chimera_session().query(chimera_model.Program).count() == 1
+    assert chimera_session().query(chimera_model.Program).count() == 0
 
 
 def test_state_changed_event_runs_reschedule_on_machine_thread(rob):
@@ -296,28 +302,10 @@ def test_start_cleans_stale_scheduler_queue(rob, chimera_session):
     assert chimera_session().query(chimera_model.Program).count() == 1
 
 
-def test_program_complete_stops_telescope_tracking(rob, chimera_session):
-    """Any finished program stops the telescope tracking so the mount never
-    tracks into a limit."""
-    _populate_program(rob)
-    rob.rob_state = RobState.ON
-    rob._handle_scheduler_idle()
-    cprogram = chimera_session().query(chimera_model.Program).one()
-
-    rob._watch_program_complete(cprogram.id, "OK")
-    assert _wait_for(lambda: "stop_tracking" in rob._fake_telescope.calls)
-
-    # not tracking: checked but not commanded
-    rob._fake_telescope.calls.clear()
-    rob._fake_telescope.tracking = False
-    rob._watch_program_complete(cprogram.id, "ERROR", "boom")
-    assert _wait_for(lambda: "is_tracking" in rob._fake_telescope.calls)
-    time.sleep(0.05)
-    assert "stop_tracking" not in rob._fake_telescope.calls
-
-
-def test_tracking_stop_disabled_without_telescope(rob, chimera_session):
-    rob["telescope"] = None
+def test_program_complete_leaves_tracking_to_the_scheduler(rob, chimera_session):
+    """robobs must not touch tracking: the stop belongs to the scheduler, which
+    issues it inline at program end.  Stopping it from here raced the next
+    program's slew and untracked the target it had just acquired."""
     _populate_program(rob)
     rob.rob_state = RobState.ON
     rob._handle_scheduler_idle()
