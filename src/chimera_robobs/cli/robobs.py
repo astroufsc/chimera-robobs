@@ -1322,6 +1322,20 @@ def cmd_process_queue(args) -> int:
         algorithms = build_algorithms(factory, site)
         engine = RobObsEngine(factory, site, log=log, algorithms=algorithms)
 
+        # Drop the previous run's simulation entries. They are re-derived on
+        # every run, and leaving them made plot-log --simulation draw the old
+        # plan on top of the new one: a rebuilt night showed 9 focus runs for
+        # 6 actually planned. Only 'Simulation:' rows go - real observations
+        # are logged under different actions and are history.
+        purged = (
+            session.query(ObservingLog)
+            .filter(ObservingLog.action.like("Simulation:%"))
+            .delete(synchronize_session=False)
+        )
+        session.commit()
+        if purged:
+            log.debug("dropped %i stale simulation log entries", purged)
+
         # twilight calibration programs (sky flats) live outside the
         # -18 deg night: widen the simulation clock to cover them
         slew_range = (
