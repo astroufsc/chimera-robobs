@@ -903,6 +903,16 @@ def cmd_plot_log(args) -> int:
         obs_end = times.obs_end.replace(tzinfo=None)
         pad = dt.timedelta(hours=2)
 
+        # The astronomical night containing the window. obs_start is NOT the
+        # night start on a mid-night --tonight replan (it is "now"), and with
+        # --date-start/--date-end it is an arbitrary query bound - anchor on
+        # the dusk preceding obs_end instead, and name the night after it.
+        dusk_aware = site.sunset_twilight_end(times.obs_end - dt.timedelta(hours=24))
+        dawn = site.sunrise_twilight_begin(dusk_aware).replace(tzinfo=None)
+        dusk = dusk_aware.replace(tzinfo=None)
+        x_lo = min(obs_start, dusk)
+        x_hi = max(obs_end, dawn)
+
         if args.simulation:
             start_marker = "Simulation: Acquisition Start"
             end_marker = "Simulation: Acquisition End"
@@ -930,13 +940,16 @@ def cmd_plot_log(args) -> int:
         alt_min, alt_max = 15.0, 90.0
         fig, ax = plt.subplots(figsize=(14, 8))
 
-        # night boundaries and the altitude floor
-        for boundary in (obs_start, obs_end):
+        # astronomical-night boundaries, the altitude floor, and when this
+        # plot was made (off-scale and invisible when plotting a past night)
+        for boundary in (dusk, dawn):
             ax.plot([boundary, boundary], [alt_min, alt_max], "r--")
-        ax.plot([obs_start - pad, obs_end + pad], [alt_min + 10] * 2, "r--")
+        ax.plot([x_lo - pad, x_hi + pad], [alt_min + 10] * 2, "r--")
+        now = site.ut().replace(tzinfo=None)
+        ax.plot([now, now], [alt_min, alt_max], "b--", label=f"plotted {now:%H:%M}")
 
         # moon altitude track
-        moon_grid = [obs_start + i * (obs_end - obs_start) / 100 for i in range(101)]
+        moon_grid = [x_lo + i * (x_hi - x_lo) / 100 for i in range(101)]
         moon_alts = []
         for when in moon_grid:
             moon_ra, moon_dec = site.moon_ra_dec(when)
@@ -997,8 +1010,8 @@ def cmd_plot_log(args) -> int:
                 ax.text(t, alt, f"{separation:.0f}", fontsize=7, clip_on=True)
 
         kind = "Simulation" if args.simulation else "Observed"
-        ax.set_title(f"robobs {kind} — night of {obs_start.date()}")
-        ax.set_xlim(obs_start - pad, obs_end + pad)
+        ax.set_title(f"robobs {kind} — night of {dusk.date()}")
+        ax.set_xlim(x_lo - pad, x_hi + pad)
         ax.set_ylim(alt_min, alt_max)
         ax.set_ylabel("Altitude (deg)")
         ax.xaxis.set_major_formatter(DateFormatter("%H:%M"))
