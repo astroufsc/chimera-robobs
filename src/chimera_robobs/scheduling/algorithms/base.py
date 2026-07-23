@@ -9,8 +9,6 @@ when available, a site adapter) via
 module-level globals to configure.
 """
 
-import math
-
 from chimera.core.exceptions import ChimeraException
 from sqlalchemy.orm import sessionmaker
 
@@ -25,14 +23,6 @@ class TimedError(ChimeraException):
 
 class RecurrentError(ChimeraException):
     pass
-
-
-def airmass(alt: float) -> float:
-    """Plane-parallel airmass for an altitude in degrees (999 below horizon)."""
-    am = 1.0 / math.cos(math.pi / 2.0 - math.radians(alt))
-    if am < 0.0:
-        am = 999.0
-    return am
 
 
 class BaseScheduleAlgorithm:

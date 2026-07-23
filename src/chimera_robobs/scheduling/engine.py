@@ -15,11 +15,10 @@ import logging
 from collections.abc import Callable
 
 import numpy as np
-from chimera.util.position import Position
+from chimera.util.position import Position, airmass
 from sqlalchemy.orm import sessionmaker
 
 from chimera_robobs.scheduling.algorithms import build_algorithms
-from chimera_robobs.scheduling.algorithms.base import airmass
 from chimera_robobs.scheduling.dates import (
     SECONDS_PER_DAY,
     datetime_from_mjd,

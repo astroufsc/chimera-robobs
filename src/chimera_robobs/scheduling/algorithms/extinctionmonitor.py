@@ -11,12 +11,11 @@ stored in the database and must not change).
 import logging
 
 import numpy as np
-from chimera.util.position import Position
+from chimera.util.position import Position, airmass
 
 from chimera_robobs.scheduling.algorithms.base import (
     BaseScheduleAlgorithm,
     ExtinctionMonitorError,
-    airmass,
 )
 from chimera_robobs.scheduling.dates import datetime_from_jd, datetime_from_mjd
 from chimera_robobs.scheduling.model import ExtMoniDB, ObservedAM, block_duration
