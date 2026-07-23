@@ -168,7 +168,10 @@ class RobObs(ChimeraObject):
     def __init__(self):
         ChimeraObject.__init__(self)
         self.rob_state = RobState.OFF
-        self._current_program = None
+        # chimera program id -> handed-over program_info 4-tuple; completion
+        # events resolve their robobs program here (in-memory, so the offer
+        # stamps like _timed_request_id survive to observed())
+        self._handed = {}
         self._no_program_on_queue = False
         self.machine = None
         self.engine = None
@@ -289,6 +292,9 @@ class RobObs(ChimeraObject):
                     "Removed %i stale program(s) from the scheduler queue.",
                     len(programs),
                 )
+
+            # the wiped queue invalidates every in-memory hand-over record
+            self._handed.clear()
 
             recovered = 0
             if pending_ids:
@@ -447,6 +453,13 @@ class RobObs(ChimeraObject):
                 "Program %s completed with status %s(%s)", program, status, message
             )
 
+            # The program_info this chimera program was handed over as.
+            # Attribution must be BY ID: the scheduler queue holds many
+            # handed programs at once, and crediting "the last one handed"
+            # marked the wrong robobs program observed (2026-07-23: an OPOP
+            # block eaten by the first focus completion of the night).
+            info = self._handed.get(program_id)
+
             if program is not None:
                 self._add_observing_log(
                     rsession,
@@ -454,10 +467,10 @@ class RobObs(ChimeraObject):
                     f"ROBOBS: Program End with status {status}({message})",
                 )
                 rsession.commit()
-            elif self._current_program is not None:
+            elif info is not None:
                 # on success the scheduler deletes its row before this event
                 # arrives: log the End from the robobs program instead
-                robobs_program = rsession.merge(self._current_program[0])
+                robobs_program = rsession.merge(info[0])
                 rsession.add(
                     ObservingLog(
                         time=datetime_from_mjd(self._site.mjd()).replace(tzinfo=None),
@@ -469,8 +482,8 @@ class RobObs(ChimeraObject):
                 )
                 rsession.commit()
 
-            if status == SchedulerStatus.OK and self._current_program is not None:
-                cp = rsession.merge(self._current_program[0])
+            if status == SchedulerStatus.OK and info is not None:
+                cp = rsession.merge(info[0])
                 cp.finished = True
                 rsession.commit()
 
@@ -479,18 +492,17 @@ class RobObs(ChimeraObject):
                     # fallback filter walk means the configured block is not
                     # what ran); SkyFlat.observed prefers this over the
                     # block's configured actions
-                    self._current_program[0]._skyflat_frames_taken = dict(
-                        self._flat_frames
-                    )
+                    info[0]._skyflat_frames_taken = dict(self._flat_frames)
                     self._flat_frames = {}
 
-                block_config = rsession.merge(self._current_program[1])
+                block_config = rsession.merge(info[1])
                 sched = self._algorithms[block_config.sched_algorithm]
-                sched.observed(self._site.mjd(), self._current_program)
+                sched.observed(self._site.mjd(), info)
                 rsession.commit()
 
-                self._current_program = None
+                self._handed.pop(program_id, None)
             elif status != SchedulerStatus.OK:
+                # entry kept in _handed so a restart can retry the program
                 self.stop()
         finally:
             csession.commit()
@@ -568,7 +580,7 @@ class RobObs(ChimeraObject):
             # tell the algorithm its offer was taken: consumption must not
             # happen in next() (the engine polls every queue while choosing)
             self._algorithms[program_info[1].sched_algorithm].committed(program_info)
-            self._current_program = program_info
+            self._handed[cprogram.id] = program_info
             self._no_program_on_queue = False
             self.log.debug("Done")
         elif self._no_program_on_queue:

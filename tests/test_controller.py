@@ -140,7 +140,7 @@ def test_handle_scheduler_idle_submits_program(rob, chimera_session):
     # bookkeeping on the robobs side
     session = rob._session()
     assert session.query(model.Program).one().finished is True
-    assert rob._current_program is not None
+    assert rob._handed
 
 
 def test_handle_scheduler_idle_when_off_does_nothing(rob, chimera_session):
@@ -179,7 +179,7 @@ def test_state_changed_event_runs_reschedule_on_machine_thread(rob):
         # only IDLE -> OFF triggers; anything else is ignored
         rob._watch_state_changed(SchedState.BUSY, SchedState.IDLE)
         time.sleep(0.05)
-        assert rob._current_program is None
+        assert not rob._handed
 
         started = time.monotonic()
         rob._watch_state_changed(SchedState.OFF, SchedState.IDLE)
@@ -187,7 +187,7 @@ def test_state_changed_event_runs_reschedule_on_machine_thread(rob):
         # the event handler must return immediately (work happens on the
         # machine thread, not on the caller/bus thread)
         assert elapsed < 0.5
-        assert _wait_for(lambda: rob._current_program is not None)
+        assert _wait_for(lambda: bool(rob._handed))
         assert _wait_for(lambda: "start" in rob._fake_scheduler.calls)
     finally:
         rob.machine.state(MachineState.SHUTDOWN)
@@ -201,7 +201,7 @@ def test_state_changed_ignored_when_off(rob):
     try:
         rob._watch_state_changed(SchedState.OFF, SchedState.IDLE)
         time.sleep(0.1)
-        assert rob._current_program is None
+        assert not rob._handed
         assert rob._fake_scheduler.calls == []
     finally:
         rob.machine.state(MachineState.SHUTDOWN)
@@ -235,14 +235,14 @@ def test_program_complete_ok_marks_observed(rob, chimera_session):
     program = _populate_program(rob)
     rob.rob_state = RobState.ON
     assert rob._handle_scheduler_idle() == 0.0
-    assert rob._current_program is not None
+    assert rob._handed
 
     csession = chimera_session()
     cprogram = csession.query(chimera_model.Program).one()
 
     rob._watch_program_complete(cprogram.id, "OK")
 
-    assert rob._current_program is None
+    assert not rob._handed
     session = rob._session()
     block = session.query(model.ObsBlock).one()
     assert block.observed is True
@@ -261,7 +261,11 @@ def test_program_complete_error_stops_robobs(rob, chimera_session):
     rob._watch_program_complete(cprogram.id, "ERROR", "boom")
 
     assert rob.rob_state == RobState.OFF
-    assert rob._current_program is not None  # kept for a retry after restart
+    # the stop's queue clean un-finishes the errored program (its chimera
+    # row never completed), so the next start re-offers it - retries now go
+    # through the recovery path, not a stale in-memory pointer
+    session = rob._session()
+    assert session.query(model.Program).one().finished is False
 
 
 def test_program_begin_writes_observing_log(rob, chimera_session):
@@ -385,7 +389,6 @@ def test_stop_recovers_handed_but_unrun_programs(rob, chimera_session):
     assert chimera_session().query(chimera_model.Program).count() == 0
 
     # and the next start re-offers the same program
-    rob._current_program = None
     rob.rob_state = RobState.ON
     assert rob._handle_scheduler_idle() == 0.0
     assert chimera_session().query(chimera_model.Program).count() == 1
@@ -462,3 +465,58 @@ def test_program_complete_ledgers_actual_flat_frames(rob, chimera_session):
 
     # counts must not leak into the next program
     assert rob._flat_frames == {}
+
+
+def test_program_complete_attributes_by_chimera_id(rob, chimera_session):
+    """With several programs handed over at once, a completion must credit
+    the robobs program it belongs to, not the last one handed. Live on
+    2026-07-23 02:21: the first focus completion of the night marked a
+    just-handed OPOP block observed instead of the focus."""
+    session = rob._session()
+    blockpar = model.BlockPar(bid=1, pid="P01")
+    blockpar.sched_algorithm = 2
+    session.add(blockpar)
+    session.commit()
+    now = rob._site.mjd()
+    for i, ra in enumerate((10.0, 10.5)):
+        target = model.Target(name=f"tgt{i}", target_ra=ra, target_dec=0.0)
+        session.add(target)
+        session.commit()
+        block = model.ObsBlock(
+            target_id=target.id, blockid=i + 1, pid="P01", block_par_id=blockpar.id
+        )
+        block.actions.append(model.Expose(frames=1, exptime=1.0))
+        session.add(block)
+        session.commit()
+        session.add(
+            model.Program(
+                target_id=target.id,
+                name=target.name,
+                priority=1,
+                slew_at=now,
+                pid="P01",
+                obsblock_id=block.id,
+                blockpar_id=blockpar.id,
+            )
+        )
+        session.add(model.TimedDB(pid="P01", execute_at=now + i * 0.0007, min_gap=0.0))
+    session.commit()
+
+    rob.rob_state = RobState.ON
+    assert rob._handle_scheduler_idle() == 0.0
+    assert rob._handle_scheduler_idle() == 0.0
+    assert len(rob._handed) == 2
+
+    csession = chimera_session()
+    first = (
+        csession.query(chimera_model.Program).order_by(chimera_model.Program.id).first()
+    )
+    rob._watch_program_complete(first.id, "OK")
+
+    session = rob._session()
+    occurrences = session.query(model.TimedDB).order_by(model.TimedDB.execute_at).all()
+    # the FIRST program's occurrence is done; the still-queued one is not
+    assert occurrences[0].finished is True
+    assert occurrences[0].observed_at > 0
+    assert occurrences[1].finished is False
+    assert len(rob._handed) == 1
