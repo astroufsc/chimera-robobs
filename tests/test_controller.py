@@ -520,3 +520,32 @@ def test_program_complete_attributes_by_chimera_id(rob, chimera_session):
     assert occurrences[0].observed_at > 0
     assert occurrences[1].finished is False
     assert len(rob._handed) == 1
+
+
+def test_queue_clean_clears_every_stale_link(rob, chimera_session):
+    """sqlite reuses program ids once the queue table empties, so a link
+    surviving a wipe can match a NEW queue's ids: the recovery then
+    un-finishes a program that RAN (8 recovered vs 7 removed, 2026-07-23
+    02:39 - a completed focus went back into the pool). After a clean, no
+    robobs program may keep a chimera_id."""
+    _populate_timed_program(rob)
+    rob.rob_state = RobState.ON
+    assert rob._handle_scheduler_idle() == 0.0
+    csession = chimera_session()
+    cprogram = csession.query(chimera_model.Program).one()
+    rob._watch_program_complete(cprogram.id, "OK")
+    # the chimera scheduler's own bookkeeping on success
+    cprogram.finished = True
+    csession.commit()
+
+    session = rob._session()
+    ran = session.query(model.Program).one()
+    assert ran.finished is True
+    assert ran.chimera_id is not None  # the link survives completion
+
+    rob.stop()
+
+    session = rob._session()
+    ran = session.query(model.Program).one()
+    assert ran.finished is True, "a program that ran was spuriously recovered"
+    assert ran.chimera_id is None, "stale link survived the queue wipe"

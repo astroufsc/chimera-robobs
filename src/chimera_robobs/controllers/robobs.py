@@ -319,6 +319,19 @@ class RobObs(ChimeraObject):
                     "Recovered %i handed-but-unrun program(s) for re-offer.",
                     recovered,
                 )
+
+            # Every link is dead once the queue is wiped - and it MUST be
+            # cleared, not just ignored: sqlite reuses program ids once the
+            # table empties, so a stale link from a previous queue
+            # generation matches a new queue's ids and the recovery
+            # un-finishes a program that RAN (8 recovered vs 7 removed,
+            # 2026-07-23 02:39).
+            for lingering in (
+                rsession.query(Program)
+                .filter(Program.chimera_id != None)  # noqa: E711
+                .all()
+            ):
+                lingering.chimera_id = None
         finally:
             rsession.commit()
             csession.commit()
@@ -577,6 +590,11 @@ class RobObs(ChimeraObject):
             # later stop un-finish exactly the programs that never ran
             program.chimera_id = cprogram.id
             session.commit()
+            # keep the in-memory row in sync: the completion handler merges
+            # it back, and merging the stale state CLOBBERED the link (an
+            # OPOP program lost its chimera_id that way, 2026-07-23)
+            program_info[0].finished = True
+            program_info[0].chimera_id = cprogram.id
             # tell the algorithm its offer was taken: consumption must not
             # happen in next() (the engine polls every queue while choosing)
             self._algorithms[program_info[1].sched_algorithm].committed(program_info)
