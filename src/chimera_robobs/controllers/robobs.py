@@ -28,7 +28,12 @@ from chimera.core.constants import SYSTEM_CONFIG_DIRECTORY
 from chimera_robobs.scheduling.algorithms import build_algorithms
 from chimera_robobs.scheduling.dates import datetime_from_mjd
 from chimera_robobs.scheduling.engine import RobObsEngine
-from chimera_robobs.scheduling.model import ObservingLog, open_database
+from chimera_robobs.scheduling.model import (
+    BlockPar,
+    ObservingLog,
+    Program,
+    open_database,
+)
 from chimera_robobs.scheduling.siteadapter import SiteAdapter
 
 #: how long to wait before retrying when the robobs queue is empty (seconds)
@@ -150,6 +155,11 @@ class RobObs(ChimeraObject):
         "cloudsensors": None,
         # robobs scheduling database (default: ~/.chimera/robobs.db)
         "database": None,
+        # sky-flat controller location; when set, robobs counts its
+        # expose_complete events so the ledger records the frames actually
+        # taken (the fallback filter walk means the configured block is not
+        # what ran)
+        "autoflat": None,
         # wipe the chimera scheduler queue when robobs is switched on, so a
         # stale queue from a previous run is not re-executed
         "clean_scheduler_on_start": True,
@@ -167,6 +177,8 @@ class RobObs(ChimeraObject):
         self._algorithms = {}
         self._scheduler_list = []
         self._events_connected = False
+        # per-filter frames taken by the running program (autoflat events)
+        self._flat_frames = {}
 
     # ------------------------------------------------------------------
     # lifecycle
@@ -256,10 +268,20 @@ class RobObs(ChimeraObject):
     def _clean_scheduler_queue(self):
         """Delete every queued chimera scheduler program (recovered
         mysql-branch behavior, e91e84f): a stale queue left by a previous
-        run would otherwise be re-executed."""
+        run would otherwise be re-executed.
+
+        Removal must be RECOVERABLE: a stop used to permanently lose every
+        handed-over program that had not run yet - the robobs side had
+        already marked them finished, so nothing re-offered them and only
+        a full replan rebuilt the night (2026-07-22, twice, 55 programs).
+        Handed-but-unrun programs are un-finished here, and their timed
+        occurrences un-committed, so the next start re-offers them.
+        """
         csession = chimera_model.Session()
+        rsession = self._session()
         try:
             programs = csession.query(chimera_model.Program).all()
+            pending_ids = {p.id for p in programs if not p.finished}
             for program in programs:
                 csession.delete(program)
             if programs:
@@ -267,7 +289,32 @@ class RobObs(ChimeraObject):
                     "Removed %i stale program(s) from the scheduler queue.",
                     len(programs),
                 )
+
+            recovered = 0
+            if pending_ids:
+                rows = (
+                    rsession.query(Program, BlockPar)
+                    .join(BlockPar, Program.blockpar_id == BlockPar.id)
+                    .filter(
+                        Program.finished == True,  # noqa: E712
+                        Program.chimera_id.in_(pending_ids),
+                    )
+                    .all()
+                )
+                for rprogram, blockpar in rows:
+                    rprogram.finished = False
+                    rprogram.chimera_id = None
+                    algorithm = self._algorithms.get(blockpar.sched_algorithm)
+                    if algorithm is not None:
+                        algorithm.uncommitted(rprogram)
+                    recovered += 1
+            if recovered:
+                self.log.info(
+                    "Recovered %i handed-but-unrun program(s) for re-offer.",
+                    recovered,
+                )
         finally:
+            rsession.commit()
             csession.commit()
 
     def stop(self) -> bool:
@@ -297,6 +344,16 @@ class RobObs(ChimeraObject):
         """Proxy to the (first) configured chimera scheduler."""
         return self.get_proxy(self._scheduler_list[0])
 
+    def _get_autoflat(self):
+        """Proxy to the sky-flat controller, or None when not configured."""
+        if self["autoflat"] is None:
+            return None
+        try:
+            return self.get_proxy(self["autoflat"])
+        except Exception:
+            self.log.exception("Could not resolve autoflat %s.", self["autoflat"])
+            return None
+
     def _get_seeing(self) -> float:
         """Current seeing from the first configured seeing monitor."""
         try:
@@ -325,6 +382,10 @@ class RobObs(ChimeraObject):
         sched.action_complete += me._watch_action_complete
         sched.state_changed += me._watch_state_changed
 
+        autoflat = self._get_autoflat()
+        if autoflat:
+            autoflat.expose_complete += me._watch_flat_expose_complete
+
     def _disconnect_scheduler_events(self):
         sched = self.get_scheduler()
         if not sched:
@@ -337,6 +398,10 @@ class RobObs(ChimeraObject):
         sched.action_begin -= me._watch_action_begin
         sched.action_complete -= me._watch_action_complete
         sched.state_changed -= me._watch_state_changed
+
+        autoflat = self._get_autoflat()
+        if autoflat:
+            autoflat.expose_complete -= me._watch_flat_expose_complete
 
     def _get_chimera_program(self, csession, program_id):
         return (
@@ -366,6 +431,8 @@ class RobObs(ChimeraObject):
                 self.log.warning("Unknown program id %s started", program_id)
                 return
             self.log.debug("Program %s started", program)
+            # frames counted from here on belong to this program
+            self._flat_frames = {}
             self._add_observing_log(rsession, program, "ROBOBS: Program Started")
         finally:
             csession.commit()
@@ -407,6 +474,16 @@ class RobObs(ChimeraObject):
                 cp.finished = True
                 rsession.commit()
 
+                if self._flat_frames:
+                    # what the sky-flat controller ACTUALLY took (its
+                    # fallback filter walk means the configured block is not
+                    # what ran); SkyFlat.observed prefers this over the
+                    # block's configured actions
+                    self._current_program[0]._skyflat_frames_taken = dict(
+                        self._flat_frames
+                    )
+                    self._flat_frames = {}
+
                 block_config = rsession.merge(self._current_program[1])
                 sched = self._algorithms[block_config.sched_algorithm]
                 sched.observed(self._site.mjd(), self._current_program)
@@ -418,6 +495,18 @@ class RobObs(ChimeraObject):
         finally:
             csession.commit()
             rsession.commit()
+
+    def _watch_flat_expose_complete(self, filter_id, i_flat, exp_time, sky_level):
+        """Count each sky-flat frame per filter as the controller takes it."""
+        self._flat_frames[filter_id] = self._flat_frames.get(filter_id, 0) + 1
+        self.log.debug(
+            "Sky flat %s on %s (%.1f s, %.0f counts): %i so far",
+            i_flat,
+            filter_id,
+            exp_time,
+            sky_level,
+            self._flat_frames[filter_id],
+        )
 
     def _watch_action_begin(self, action_id, message):
         self.log.debug("Action %s %s ...", action_id, message)
@@ -472,6 +561,9 @@ class RobObs(ChimeraObject):
             csession.add(cprogram)
             csession.commit()
             program.finished = True
+            # remember which chimera program this became: it is what lets a
+            # later stop un-finish exactly the programs that never ran
+            program.chimera_id = cprogram.id
             session.commit()
             # tell the algorithm its offer was taken: consumption must not
             # happen in next() (the engine polls every queue while choosing)

@@ -447,6 +447,27 @@ class Timed(Higher):
         finally:
             session.commit()
 
+    def uncommitted(self, program):
+        """Release the occurrence a removed-but-unrun program had consumed."""
+        session = self.session()
+        try:
+            request = (
+                session.query(TimedDB)
+                .filter(
+                    TimedDB.pid == program.pid,
+                    TimedDB.target_id == program.target_id,
+                    TimedDB.block_id == program.obsblock_id,
+                    TimedDB.scheduled == True,  # noqa: E712
+                    TimedDB.finished == False,  # noqa: E712
+                )
+                .order_by(TimedDB.execute_at)
+                .first()
+            )
+            if request is not None:
+                request.scheduled = False
+        finally:
+            session.commit()
+
     def observed(self, time, program, soft=False):
         session = self.session()
 

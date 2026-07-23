@@ -1057,3 +1057,95 @@ def test_soft_clean_resets_scheduled(session_factory):
         .count()
         == 0
     )
+
+
+def test_timed_uncommitted_releases_occurrence(session_factory):
+    """Stop recovery: uncommitted() releases the occurrence a
+    committed-but-unrun program had consumed, so the next poll re-offers
+    it (a stop used to lose it permanently)."""
+    site = FakeSite(latitude=0.0, lst_rads=10.0 * math.pi / 12.0)
+    factory = session_factory
+    row = _timed_setup(factory, site, [0.0, 2.0], expire_overdue=False)
+    timed = build_algorithms(factory, site)[2]
+    now = site.mjd()
+
+    offer = timed.next(now, [row])
+    committed_slew = offer[0].slew_at
+    timed.committed(offer)
+    session = factory()
+    scheduled = session.query(model.TimedDB).filter(
+        model.TimedDB.scheduled == True  # noqa: E712
+    )
+    assert scheduled.count() == 1
+
+    # the handed-over program is removed from the queue before running
+    timed.uncommitted(offer[0])
+
+    session = factory()
+    assert (
+        session.query(model.TimedDB)
+        .filter(model.TimedDB.scheduled == True)  # noqa: E712
+        .count()
+        == 0
+    )
+    again = timed.next(now, [row])
+    assert again is not None
+    assert again[0].slew_at == pytest.approx(committed_slew)
+
+
+def test_timed_expire_overdue_full_production_flow(session_factory):
+    """expire_overdue end to end through the PRODUCTION flow — offer
+    (next), commit (hand-over) and observed (stamped occurrence id) — not
+    the soft simulation shortcut the other expire tests use: a run delayed
+    into the next occurrence's window absorbs it and the following one is
+    still served."""
+    site = FakeSite(latitude=0.0, lst_rads=10.0 * math.pi / 12.0)
+    factory = session_factory
+    row = _timed_setup(factory, site, [0.0, 2.0, 4.0, 6.0], expire_overdue=True)
+    timed = build_algorithms(factory, site)[2]
+    now = site.mjd()
+
+    def run(at, expect_slew):
+        offer = timed.next(at, [row])
+        assert offer is not None
+        assert offer[0].slew_at == pytest.approx(expect_slew)
+        timed.committed(offer)
+        session = factory()
+        # exactly the offered occurrence is consumed (finished occurrences
+        # keep their scheduled flag: filter them out)
+        assert (
+            session.query(model.TimedDB)
+            .filter(
+                model.TimedDB.scheduled == True,  # noqa: E712
+                model.TimedDB.finished == False,  # noqa: E712
+            )
+            .count()
+            == 1
+        )
+        timed.observed(at, offer)
+
+    run(now, now)  # dusk occurrence on time
+    run(now + 3.5 / 24.0, now + 2.0 / 24.0)  # the 2 h occurrence runs late
+
+    # the 4 h occurrence (30 min after the late run) is absorbed; the 6 h
+    # one is the next offer
+    offer = timed.next(now + 3.6 / 24.0, [row])
+    assert offer is not None
+    assert offer[0].slew_at == pytest.approx(now + 6.0 / 24.0)
+
+    session = factory()
+    expired = (
+        session.query(model.TimedDB)
+        .filter(model.TimedDB.finished == True, model.TimedDB.observed_at == 0)  # noqa: E712
+        .all()
+    )
+    assert len(expired) == 1
+    assert expired[0].execute_at == pytest.approx(now + 4.0 / 24.0)
+    # the two runs anchored the expiry window on their ACTUAL times
+    ran = (
+        session.query(model.TimedDB)
+        .filter(model.TimedDB.observed_at > 0)
+        .order_by(model.TimedDB.execute_at)
+        .all()
+    )
+    assert [r.observed_at for r in ran] == pytest.approx([now, now + 3.5 / 24.0])

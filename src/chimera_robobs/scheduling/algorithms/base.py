@@ -97,6 +97,16 @@ class BaseScheduleAlgorithm:
         six focus occurrences eaten in six reschedules, none executed).
         """
 
+    def uncommitted(self, program):
+        """A committed program was removed from the scheduler before running.
+
+        Inverse of :meth:`committed`: whatever state the commit consumed
+        must be released so the entry can be offered again (a stop used to
+        eat the night's timed occurrences permanently). ``program`` is the
+        robobs Program ROW, not the 4-tuple - the caller recovers programs
+        straight from the database.
+        """
+
     def observed(self, time, program, soft=False):
         """Process a program as observed."""
 

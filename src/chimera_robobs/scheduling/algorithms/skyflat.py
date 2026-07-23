@@ -225,10 +225,18 @@ class SkyFlat(BaseScheduleAlgorithm):
                 block.last_observation = now
                 # feed the ledger the selection reads back (production
                 # only: the offline simulation passes soft=True).
-                # Prefer the filters captured by next() at selection time:
-                # resolving block.actions HERE trusts an obsblock id that a
-                # clean/reload may have reassigned to another filter.
-                captured = getattr(program[0], "_skyflat_ledger", None)
+                # Best source: the frames the controller ACTUALLY took, per
+                # its expose_complete events - the fallback filter walk and
+                # the sun window mean the configured set is neither the
+                # filters nor the counts that ran. Next best: the filters
+                # captured by next() at selection time (resolving
+                # block.actions HERE trusts an obsblock id that a
+                # clean/reload may have reassigned to another filter).
+                taken = getattr(program[0], "_skyflat_frames_taken", None)
+                if taken:
+                    captured = list(taken.items())
+                else:
+                    captured = getattr(program[0], "_skyflat_ledger", None)
                 if captured is None:
                     captured = [
                         (act.filter, act.frames or 0)

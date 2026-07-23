@@ -314,3 +314,151 @@ def test_program_complete_leaves_tracking_to_the_scheduler(rob, chimera_session)
     rob._watch_program_complete(cprogram.id, "OK")
     time.sleep(0.1)
     assert rob._fake_telescope.calls == []
+
+
+def _populate_timed_program(controller):
+    """A timed (algorithm 2) program with one due occurrence."""
+    session = controller._session()
+    target = model.Target(name="tgt", target_ra=10.0, target_dec=0.0)
+    session.add(target)
+    session.commit()
+    blockpar = model.BlockPar(bid=1, pid="P01")
+    blockpar.sched_algorithm = 2
+    session.add(blockpar)
+    session.commit()
+    block = model.ObsBlock(
+        target_id=target.id, blockid=1, pid="P01", block_par_id=blockpar.id
+    )
+    block.actions.append(model.Expose(frames=1, exptime=1.0))
+    session.add(block)
+    session.commit()
+    program = model.Program(
+        target_id=target.id,
+        name=target.name,
+        priority=1,
+        slew_at=controller._site.mjd(),
+        pid="P01",
+        obsblock_id=block.id,
+        blockpar_id=blockpar.id,
+    )
+    session.add(program)
+    session.add(
+        model.TimedDB(pid="P01", execute_at=controller._site.mjd(), min_gap=0.0)
+    )
+    session.commit()
+    return program
+
+
+def test_stop_recovers_handed_but_unrun_programs(rob, chimera_session):
+    """A stop wipes the chimera queue, but handed-over programs that never
+    RAN must come back: the robobs side had already marked them finished,
+    so nothing re-offered them and only a full replan rebuilt the night
+    (2026-07-22, twice, 55 programs lost)."""
+    _populate_timed_program(rob)
+    rob.rob_state = RobState.ON
+    assert rob._handle_scheduler_idle() == 0.0
+
+    session = rob._session()
+    handed = session.query(model.Program).one()
+    assert handed.finished is True
+    assert handed.chimera_id is not None
+    assert (
+        session.query(model.TimedDB)
+        .filter(model.TimedDB.scheduled == True)  # noqa: E712
+        .count()
+        == 1
+    )
+
+    rob.stop()
+
+    session = rob._session()
+    recovered = session.query(model.Program).one()
+    assert recovered.finished is False
+    assert recovered.chimera_id is None
+    # the timed occurrence the commit consumed is released too
+    assert (
+        session.query(model.TimedDB)
+        .filter(model.TimedDB.scheduled == True)  # noqa: E712
+        .count()
+        == 0
+    )
+    assert chimera_session().query(chimera_model.Program).count() == 0
+
+    # and the next start re-offers the same program
+    rob._current_program = None
+    rob.rob_state = RobState.ON
+    assert rob._handle_scheduler_idle() == 0.0
+    assert chimera_session().query(chimera_model.Program).count() == 1
+
+
+def test_stop_keeps_completed_programs_finished(rob, chimera_session):
+    """Only handed-but-UNRUN programs are recovered: one whose chimera row
+    is finished already ran and must stay finished or it would repeat."""
+    _populate_timed_program(rob)
+    rob.rob_state = RobState.ON
+    rob._handle_scheduler_idle()
+    csession = chimera_session()
+    cprogram = csession.query(chimera_model.Program).one()
+    cprogram.finished = True
+    csession.commit()
+
+    rob.stop()
+
+    session = rob._session()
+    assert session.query(model.Program).one().finished is True
+
+
+def _populate_skyflat_program(controller):
+    """A sky-flat (algorithm 5) program whose block configures R x 9."""
+    session = controller._session()
+    target = model.Target(name="flat", target_ra=0.0, target_dec=0.0)
+    session.add(target)
+    session.commit()
+    blockpar = model.BlockPar(bid=1, pid="CAL")
+    blockpar.sched_algorithm = 5
+    session.add(blockpar)
+    session.commit()
+    block = model.ObsBlock(
+        target_id=target.id, blockid=1, pid="CAL", block_par_id=blockpar.id
+    )
+    block.actions.append(model.AutoFlat(filter="R", frames=9))
+    session.add(block)
+    session.commit()
+    program = model.Program(
+        target_id=target.id,
+        name="skyflat",
+        priority=0,
+        slew_at=controller._site.mjd(),
+        pid="CAL",
+        obsblock_id=block.id,
+        blockpar_id=blockpar.id,
+    )
+    session.add(program)
+    session.commit()
+    return program
+
+
+def test_program_complete_ledgers_actual_flat_frames(rob, chimera_session):
+    """The skyflat ledger must record what the controller actually TOOK
+    (per its expose_complete events): the fallback filter walk switches
+    filters mid-set, so the block's configured count is neither the
+    filters nor the frames that ran."""
+    _populate_skyflat_program(rob)
+    rob._site._sun_alt = -10.0  # inside the coarse twilight gate
+    rob.rob_state = RobState.ON
+    assert rob._handle_scheduler_idle() == 0.0
+    cprogram = chimera_session().query(chimera_model.Program).one()
+
+    rob._watch_program_begin(cprogram.id)
+    for i in range(3):
+        rob._watch_flat_expose_complete("R", i + 1, 10.0, 25000.0)
+    for i in range(2):
+        rob._watch_flat_expose_complete("CLEAR", i + 4, 5.0, 24000.0)
+    rob._watch_program_complete(cprogram.id, "OK")
+
+    session = rob._session()
+    ledger = {e.filter: e.frames for e in session.query(model.SkyFlatDB).all()}
+    assert ledger == {"R": 3, "CLEAR": 2}
+
+    # counts must not leak into the next program
+    assert rob._flat_frames == {}

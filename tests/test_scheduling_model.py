@@ -231,3 +231,26 @@ def test_blockpar_str_with_fractional_cloud_cover():
     blockpar.cloud_cover = 0.8
     blockpar.sched_algorithm = 3
     assert "0.8" in str(blockpar)
+
+
+def test_open_database_adds_chimera_id_to_existing_database(tmp_path):
+    """create_all only adds missing TABLES: a database from before the
+    Program.chimera_id column must be migrated in place or every query on
+    the model fails."""
+    import sqlite3
+
+    path = tmp_path / "robobs.db"
+    model.open_database(str(path))
+    connection = sqlite3.connect(path)
+    connection.execute("ALTER TABLE program DROP COLUMN chimera_id")
+    connection.commit()
+    connection.close()
+
+    factory = model.open_database(str(path))
+    session = factory()
+    program = model.Program(name="x", pid="P01", priority=1)
+    session.add(program)
+    session.commit()
+    program.chimera_id = 42
+    session.commit()
+    assert session.query(model.Program).one().chimera_id == 42

@@ -75,6 +75,16 @@ def open_database(path: str | None = None, echo: bool = False) -> sessionmaker:
         echo=echo,
     )
     Base.metadata.create_all(engine)
+    # create_all adds missing TABLES only: existing databases need new
+    # columns added by hand or every query on the model fails
+    with engine.begin() as connection:
+        columns = {
+            row[1] for row in connection.exec_driver_sql("PRAGMA table_info(program)")
+        }
+        if "chimera_id" not in columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE program ADD COLUMN chimera_id INTEGER"
+            )
     # expire_on_commit=False: program tuples are passed between sessions
     # (controller event handlers, scheduling algorithms) and must stay
     # readable after commits, as the legacy code assumed.
@@ -337,6 +347,12 @@ class Program(Base):
     project_id = Column(Integer, ForeignKey("projects.id"))
     obsblock_id = Column(Integer, ForeignKey("obsblock.id"))
     blockpar_id = Column(Integer, ForeignKey("blockpar.id"))
+    # id of the chimera scheduler Program this one was handed over as.
+    # The link is what makes a stop RECOVERABLE: cleaning the scheduler
+    # queue can tell which robobs programs never ran and un-finish them,
+    # instead of losing the night (2026-07-22: two stops, 55 programs
+    # gone, full replans to recover).
+    chimera_id = Column(Integer, default=None)
 
     def __str__(self):
         return (
