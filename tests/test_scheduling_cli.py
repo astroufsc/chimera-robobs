@@ -364,3 +364,15 @@ def test_select_blocks_lst_window(tmp_path, db):
     session.commit()
     rows = cli.select_blocks(session, "P01", 22.0, 2.0)[:]
     assert sorted(r[2].target_ra for r in rows) == [0.0, 1.0, 23.0]
+
+
+def test_pool_lst_start_past_meridian_only():
+    """A past_meridian_only project needs already-culminated targets, but
+    the default cut (night-start LST - 2 h) keeps only targets that
+    culminate DURING the night — the exact complement — so no candidate
+    was ever eligible at the early occurrences (0 of 20 on 2026-07-21)."""
+    assert cli.pool_lst_start(10.0, {}) == 10.0
+    assert cli.pool_lst_start(10.0, {"past_meridian_only": False}) == 10.0
+    widened = cli.pool_lst_start(10.0, {"past_meridian_only": True})
+    assert widened == 10.0 - cli.PAST_MERIDIAN_POOL_HOURS
+    assert cli.PAST_MERIDIAN_POOL_HOURS >= 4.0

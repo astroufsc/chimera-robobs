@@ -1115,6 +1115,23 @@ def make_times(args, site: SiteAdapter) -> SimpleNamespace:
     )
 
 
+#: extra hours of already-culminated sky admitted to the pool when a
+#: project runs past_meridian_only. The default cut (night-start LST - 2 h)
+#: keeps only targets that culminate DURING the night - the exact
+#: complement of what the constraint needs, so no candidate was ever
+#: eligible at the early occurrences (0 of 20 on 2026-07-21). 5 h of
+#: western sky covers a target down to ~airmass 2.8 past the meridian;
+#: the airmass check still rejects anything that has set.
+PAST_MERIDIAN_POOL_HOURS = 5.0
+
+
+def pool_lst_start(lst_start: float, config: dict) -> float:
+    """Left edge of the target-selection LST window for a project."""
+    if config.get("past_meridian_only"):
+        return lst_start - PAST_MERIDIAN_POOL_HOURS
+    return lst_start
+
+
 def select_blocks(session, pid: str, lst_start: float, lst_end: float):
     """Query the not-yet-scheduled blocks of a project inside an LST window.
 
@@ -1221,8 +1238,13 @@ def cmd_make_queue(args) -> int:
     try:
         site = SiteAdapter(site_proxy)
         times = make_times(args, site)
-        lst_start = times.lst_start - 2.0
+        lst_start = pool_lst_start(times.lst_start - 2.0, pgrconfig)
         lst_end = times.lst_end + 2.0
+        if lst_start != times.lst_start - 2.0:
+            _out(
+                f"-past_meridian_only: widening the pool to LST "
+                f"{lst_start:4.1f} h (already-culminated targets admitted)"
+            )
 
         _out(
             f"-Observation start @ {str(times.obs_start)[:19]} | LST = {lst_start:4.1f} h"
