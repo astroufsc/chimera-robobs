@@ -10,12 +10,9 @@ Also hosts the slot-allocation loop shared with :class:`TimeSequence`
 import logging
 
 import numpy as np
-from chimera.util.position import Position
+from chimera.util.position import Position, airmass
 
-from chimera_robobs.scheduling.algorithms.base import (
-    BaseScheduleAlgorithm,
-    airmass,
-)
+from chimera_robobs.scheduling.algorithms.base import BaseScheduleAlgorithm
 from chimera_robobs.scheduling.dates import SECONDS_PER_DAY, datetime_from_jd
 from chimera_robobs.scheduling.model import ObsBlock
 
@@ -227,7 +224,7 @@ class Higher(BaseScheduleAlgorithm):
             max_airmass = rows[radec_pos[stg]][1].max_airmass
             # Since this is the highest at this time, it doesn't make sense
             # to iterate over it.
-            too_low = start_airmass > max_airmass or slot_airmass >= 999.0
+            too_low = start_airmass > max_airmass or alt[stg] <= 0.0
             if self.check_end_airmass:
                 too_low = too_low or end_airmass > max_airmass or start_alt < 0.0
             if too_low:
