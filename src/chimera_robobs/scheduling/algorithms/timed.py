@@ -332,9 +332,23 @@ class Timed(Higher):
 
             execute_at = timed_observation.execute_at
 
+            # An OVERDUE unbound occurrence is served as soon as it can be,
+            # so every condition below must be judged against the sky the
+            # block will actually see. Judged at the historic execute_at it
+            # picks the target that suited hours ago; the engine re-checks
+            # the returned program at the current time, rejects it, and
+            # because a candidate did "pass" here the expiry branch never
+            # fires - the project wedges behind the stale occurrence and
+            # loses the rest of the night (opd-40 2026-07-26: the dome
+            # opened 6.7 h after the first focus slot, so every poll served
+            # the 22:52 standard, by then below the horizon, and no focus
+            # ran at all). Bound occurrences keep their fixed instant -
+            # that is the whole point of binding them.
+            effective_at = max(execute_at, now_mjd)
+
             # Walk the candidates in Higher order (slot time closest to
             # now) and take the first whose target is actually observable
-            # at the requested execution time.  The legacy code committed
+            # at the effective execution time.  The legacy code committed
             # to the single closest candidate and gave the night's request
             # up when it failed a condition (seen live: the focus standard
             # closest in time sat 0.7 deg inside its own moon limit while
@@ -350,21 +364,21 @@ class Timed(Higher):
                 # Without this it schedules targets still east of the
                 # meridian - a pier flip mid-run on a GEM (seen live: the
                 # first focus of the night 1.4 h before the meridian).
-                if past_meridian_only and not self._is_past_meridian(row, execute_at):
+                if past_meridian_only and not self._is_past_meridian(row, effective_at):
                     log.info(
                         "Timed candidate %s is still east of the meridian @ "
                         "%.3f; trying the next one.",
                         row[0],
-                        execute_at,
+                        effective_at,
                     )
                     continue
-                if check is None or check(row, execute_at, row[2].length or 0.0):
+                if check is None or check(row, effective_at, row[2].length or 0.0):
                     program_list = row
                     break
                 log.info(
                     "Timed candidate %s not observable @ %.3f; trying the next one.",
                     row[0],
-                    execute_at,
+                    effective_at,
                 )
             if program_list is None:
                 if execute_at > now_mjd:
@@ -379,13 +393,15 @@ class Timed(Higher):
                         (execute_at - now_mjd) * 24.0 * 60.0,
                     )
                     return None
-                # Due or overdue: every condition is a function of the FIXED
-                # execute_at, so it will fail identically at every later
-                # poll. Expire it, or the whole project wedges behind it and
-                # loses the night's remaining runs.
+                # Due or overdue: nothing in the queue can serve it now, and
+                # an overdue occurrence is only ever retried at "now", which
+                # the next poll re-evaluates anyway. Expire it, or the whole
+                # project wedges behind it and loses the night's remaining
+                # runs.
                 log.warning(
-                    "No timed candidate observable @ %.3f (%i tried). "
-                    "Expiring the occurrence.",
+                    "No timed candidate observable @ %.3f (occurrence %.3f, "
+                    "%i tried). Expiring the occurrence.",
+                    effective_at,
                     execute_at,
                     len(candidates),
                 )
@@ -395,7 +411,10 @@ class Timed(Higher):
             # Replace the slot slew time with the requested execution time —
             # on the caller's row: setting it on a merged copy in this
             # session left the caller holding the stale slot time (also
-            # seen live).
+            # seen live).  Overdue occurrences keep their NOMINAL time here:
+            # the engine clamps a past slew_at to "now" everywhere it
+            # matters (wait time, condition re-check), and the nominal value
+            # is what makes a late run visible as late.
             program_list[0].slew_at = execute_at
 
             timed_observation.target_id = program_list[0].target_id

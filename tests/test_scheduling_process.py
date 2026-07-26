@@ -456,6 +456,101 @@ def test_timed_next_falls_back_when_candidate_fails_conditions(session_factory):
     assert chosen is None
 
 
+def _overdue_setup(session, factory, site, hours_overdue, ra_hours):
+    """A single pending occurrence ``hours_overdue`` in the past, plus one
+    TIMED program per entry in ``ra_hours`` (ordered so the first is the
+    closest to now and would be tried first)."""
+    now = site.mjd()
+    execute_at = now - hours_overdue / 24.0
+
+    programs = []
+    for i, ra in enumerate(ra_hours):
+        block = _add_block(
+            session, ra_hours=ra, blockid=i + 1, sched_algorithm=2, max_airmass=2.0
+        )
+        program = model.Program(
+            target_id=block.target_id,
+            name=f"tgt{i + 1}",
+            priority=1,
+            slew_at=now + i * 0.01,
+            pid="P01",
+            obsblock_id=block.id,
+            blockpar_id=block.block_par_id,
+        )
+        session.add(program)
+        programs.append(program)
+    session.add(model.TimedDB(pid="P01", execute_at=execute_at, min_gap=0.0))
+    session.commit()
+    return now, execute_at, programs
+
+
+def test_timed_overdue_occurrence_is_judged_against_the_current_sky(session_factory):
+    """An occurrence missed while the dome was shut must be served with a
+    target that is up NOW, not the one that suited its nominal time.
+
+    Live on opd-40 2026-07-26: the dome opened 6.7 h after the night's first
+    focus slot. Selection judged candidates at the stale execute_at, so the
+    22:52 standard kept winning; the engine then re-checked it at the real
+    time, found it below the horizon and skipped it. Because a candidate had
+    "passed", the occurrence was never expired either, so every poll repeated
+    the same dead choice and no focus ran all night.
+    """
+    from chimera_robobs.scheduling.engine import RobObsEngine
+
+    factory = session_factory
+    session = factory()
+    site = RotatingSite(
+        latitude=0.0, lst_rads=NIGHT_START_LST_HOURS * math.pi / 12.0, ut_now=UT
+    )
+    # LST is 10 h now, so it was 3.3 h when the occurrence was due:
+    #   RA 3.3 h  - on the meridian back then, ~100 deg east of it now
+    #   RA 9.5 h  - just past the meridian now, far below it back then
+    now, execute_at, programs = _overdue_setup(
+        session, factory, site, hours_overdue=6.7, ra_hours=(3.3, 9.5)
+    )
+
+    engine = RobObsEngine(factory, site, algorithms=build_algorithms(factory, site))
+    chosen, plen = engine.get_program(now, 1)
+
+    assert chosen is not None
+    # the currently-observable target wins, although the stale one was both
+    # closer in time and the one that suited the nominal instant
+    assert chosen[0].id == programs[1].id
+    # nominal slot time is preserved (a late run stays visibly late), and the
+    # engine's own current-time re-check now agrees with the selection
+    assert chosen[0].slew_at == pytest.approx(execute_at)
+    assert engine.check_conditions(chosen, max(now, chosen[0].slew_at), plen)
+
+
+def test_timed_overdue_occurrence_expires_when_nothing_is_up_now(session_factory):
+    """Same setup, but with no target observable at the current time: the
+    overdue occurrence must expire instead of being retried forever, so the
+    project can move on to the night's later occurrences."""
+    from chimera_robobs.scheduling.engine import RobObsEngine
+
+    factory = session_factory
+    session = factory()
+    site = RotatingSite(
+        latitude=0.0, lst_rads=NIGHT_START_LST_HOURS * math.pi / 12.0, ut_now=UT
+    )
+    # both targets were up when the occurrence was due; both are ~100 deg
+    # east of the meridian now
+    now, execute_at, _ = _overdue_setup(
+        session, factory, site, hours_overdue=6.7, ra_hours=(3.3, 3.5)
+    )
+
+    engine = RobObsEngine(factory, site, algorithms=build_algorithms(factory, site))
+    chosen, _ = engine.get_program(now, 1)
+
+    assert chosen is None
+    session = factory()
+    occurrence = session.query(model.TimedDB).one()
+    assert occurrence.finished is True
+    # expired, not run: observed_at stays 0 so the min_gap window of the
+    # night's later occurrences is not anchored on it
+    assert occurrence.observed_at == 0
+
+
 def _timed_setup(factory, site, times_hours, expire_overdue):
     """One target/block plus TimedDB requests at now + times_hours."""
     session = factory()
