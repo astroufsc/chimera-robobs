@@ -267,8 +267,45 @@ class Timed(Higher):
             # served). Discount the block's own length from the boundary.
             block_length_days = (programs[0][2].length or 0.0) / SECONDS_PER_DAY
 
+            # Backlog collapse: when several unbound occurrences are already
+            # due (execute_at <= now), only the most recent cadence slot is
+            # worth running; the earlier ones are stale catch-up. This must
+            # NOT depend on a successful previous run - the last_run_at gate
+            # below anchors on observed_at, so an all-errored backlog (no
+            # occurrence ever completed OK) has no anchor and nothing
+            # expired: focus errored all night on 2026-07-26 and then drained
+            # several runs back-to-back once it finally worked, with science
+            # waiting behind it. min_gap flags expire_overdue, but the FIRST
+            # occurrence always carries min_gap 0, so the opt-in is read from
+            # the whole set, not the individual request.
+            expire_overdue_on = any(r.min_gap for r in pending)
+            latest_due_at = max(
+                (
+                    r.execute_at
+                    for r in pending
+                    if not r.bound and r.execute_at <= now_mjd
+                ),
+                default=None,
+            )
+
             timed_observation = None
             for request in pending:
+                if (
+                    expire_overdue_on
+                    and not request.bound
+                    and latest_due_at is not None
+                    and request.execute_at < latest_due_at
+                ):
+                    # expire_overdue: a more recent occurrence is also due, so
+                    # this overdue one is superseded (works with no prior run)
+                    log.info(
+                        "Timed request @ %.3f expired: superseded by a later "
+                        "due occurrence @ %.3f.",
+                        request.execute_at,
+                        latest_due_at,
+                    )
+                    request.finished = True
+                    continue
                 if (
                     request.min_gap
                     and last_run_at is not None

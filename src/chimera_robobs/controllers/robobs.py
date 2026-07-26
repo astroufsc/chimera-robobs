@@ -163,6 +163,11 @@ class RobObs(ChimeraObject):
         # wipe the chimera scheduler queue when robobs is switched on, so a
         # stale queue from a previous run is not re-executed
         "clean_scheduler_on_start": True,
+        # how many CONSECUTIVE program errors robobs tolerates before it
+        # stops itself. A single failure (a focus that could not fit, a bad
+        # frame) skips one program and continues; a run of them means the
+        # hardware or sky is unusable and the night should hold.
+        "max_consecutive_errors": 3,
     }
 
     def __init__(self):
@@ -182,6 +187,8 @@ class RobObs(ChimeraObject):
         self._events_connected = False
         # per-filter frames taken by the running program (autoflat events)
         self._flat_frames = {}
+        # consecutive program-error count; a run of them stops robobs
+        self._consecutive_errors = 0
 
     # ------------------------------------------------------------------
     # lifecycle
@@ -510,6 +517,7 @@ class RobObs(ChimeraObject):
                 rsession.commit()
 
             if status == SchedulerStatus.OK and info is not None:
+                self._consecutive_errors = 0
                 cp = rsession.merge(info[0])
                 cp.finished = True
                 rsession.commit()
@@ -529,8 +537,33 @@ class RobObs(ChimeraObject):
 
                 self._handed.pop(program_id, None)
             elif status != SchedulerStatus.OK:
-                # entry kept in _handed so a restart can retry the program
-                self.stop()
+                # A single program failure must cost ONE program, not the
+                # night. The old self.stop() here turned every failed focus
+                # into a stop -> clean -> recover -> re-hand churn and, with
+                # the whole timed backlog re-offered, several catch-up runs
+                # once it recovered (2026-07-26). The failed program is
+                # already finished on the robobs side and its occurrence
+                # stays committed, so it is not retried; just drop the
+                # in-memory link and let the machine pick the next program.
+                # Only a RUN of failures (camera/dome down) stops robobs.
+                self._handed.pop(program_id, None)
+                self._consecutive_errors += 1
+                limit = int(self["max_consecutive_errors"])
+                if self._consecutive_errors >= limit:
+                    self.log.error(
+                        "%i consecutive program errors; stopping robobs "
+                        "(something is systemically wrong).",
+                        self._consecutive_errors,
+                    )
+                    self.stop()
+                else:
+                    self.log.warning(
+                        "Program %s failed (%i/%i consecutive); skipping it "
+                        "and continuing with the next program.",
+                        program_id,
+                        self._consecutive_errors,
+                        limit,
+                    )
         finally:
             csession.commit()
             rsession.commit()

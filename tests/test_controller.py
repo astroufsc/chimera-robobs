@@ -251,21 +251,50 @@ def test_program_complete_ok_marks_observed(rob, chimera_session):
     assert session.query(model.Program).get(program.id).finished is True
 
 
-def test_program_complete_error_stops_robobs(rob, chimera_session):
+def test_single_program_error_does_not_stop_robobs(rob, chimera_session):
+    """One failed program costs one program, not the night. The old
+    self-stop turned every failed focus into a stop/recover/re-hand churn
+    and, once recovered, several catch-up runs (2026-07-26)."""
     _populate_program(rob)
     rob.rob_state = RobState.ON
     rob._handle_scheduler_idle()
-    csession = chimera_session()
-    cprogram = csession.query(chimera_model.Program).one()
+    cprogram = chimera_session().query(chimera_model.Program).one()
 
     rob._watch_program_complete(cprogram.id, "ERROR", "boom")
 
+    assert rob.rob_state == RobState.ON  # still driving
+    assert rob._consecutive_errors == 1
+    assert not rob._handed  # the failed program's link is dropped, not retried
+
+
+def test_consecutive_errors_eventually_stop_robobs(rob, chimera_session):
+    """A RUN of errors (camera/dome unusable) still stops robobs at the
+    configured threshold; an OK in between resets the count."""
+    rob["max_consecutive_errors"] = 3
+    rob.rob_state = RobState.ON
+
+    def run_once(status):
+        _populate_program(rob)
+        rob._handle_scheduler_idle()
+        cid = (
+            chimera_session()
+            .query(chimera_model.Program)
+            .order_by(chimera_model.Program.id.desc())
+            .first()
+            .id
+        )
+        rob._watch_program_complete(cid, status, "x")
+
+    run_once("ERROR")
+    run_once("ERROR")
+    assert rob.rob_state == RobState.ON  # 2 < 3, still going
+    run_once("OK")
+    assert rob._consecutive_errors == 0  # OK reset the streak
+    run_once("ERROR")
+    run_once("ERROR")
+    assert rob.rob_state == RobState.ON
+    run_once("ERROR")  # third in a row
     assert rob.rob_state == RobState.OFF
-    # the stop's queue clean un-finishes the errored program (its chimera
-    # row never completed), so the next start re-offers it - retries now go
-    # through the recovery path, not a stale in-memory pointer
-    session = rob._session()
-    assert session.query(model.Program).one().finished is False
 
 
 def test_program_begin_writes_observing_log(rob, chimera_session):

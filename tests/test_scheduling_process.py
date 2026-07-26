@@ -622,8 +622,9 @@ def test_timed_expire_overdue_absorbs_next_occurrence(session_factory):
 
 
 def test_timed_expire_overdue_collapses_backlog(session_factory):
-    """A long blockage self-collapses: after a run at +5 h, the 4 h and 6 h
-    occurrences are absorbed and the 8 h one survives."""
+    """A long blockage self-collapses: at +5 h the 2 h and 4 h occurrences
+    are both due, so the CURRENT slot (4 h) runs and the stale 2 h expires;
+    then 6 h is absorbed and 8 h survives."""
     site = FakeSite(latitude=0.0, lst_rads=10.0 * math.pi / 12.0)
     factory = session_factory
     row = _timed_setup(factory, site, [2.0, 4.0, 6.0, 8.0], expire_overdue=True)
@@ -631,12 +632,13 @@ def test_timed_expire_overdue_collapses_backlog(session_factory):
     timed = algorithms[2]
     now = site.mjd()
 
-    # scheduler blocked until +5 h; the 2 h occurrence finally runs there
+    # blocked until +5 h; the most recent due slot (4 h) runs there, not the
+    # stale 2 h one (backlog collapse serves the current cadence point)
     chosen = timed.next(now + 5.0 / 24.0, [row])
-    assert chosen[0].slew_at == pytest.approx(now + 2.0 / 24.0)
+    assert chosen[0].slew_at == pytest.approx(now + 4.0 / 24.0)
     timed.observed(now + 5.0 / 24.0, row, soft=True)
 
-    # 4 h (< 5+2) and 6 h (< 7+... within the chain) are absorbed
+    # 6 h is absorbed (within the chain); 8 h survives
     chosen = timed.next(now + 5.1 / 24.0, [row])
     assert chosen is not None
     assert chosen[0].slew_at == pytest.approx(now + 8.0 / 24.0)
@@ -1244,3 +1246,57 @@ def test_timed_expire_overdue_full_production_flow(session_factory):
         .all()
     )
     assert [r.observed_at for r in ran] == pytest.approx([now, now + 3.5 / 24.0])
+
+
+def test_timed_backlog_collapses_without_a_successful_anchor(session_factory):
+    """An all-errored overdue backlog must still collapse to ONE due run.
+
+    expire_overdue's last_run gate anchors on observed_at, so when every
+    attempt errors (no occurrence ever completes OK) it never fires and the
+    whole backlog stays live - focus then drained several runs back-to-back
+    once it finally worked (2026-07-26). Backlog collapse expires the
+    superseded overdue occurrences regardless of any prior run."""
+    site = FakeSite(latitude=0.0, lst_rads=10.0 * math.pi / 12.0)
+    factory = session_factory
+    # three occurrences all in the PAST relative to now: -4 h, -2 h, 0 h
+    row = _timed_setup(factory, site, [-4.0, -2.0, 0.0], expire_overdue=True)
+    timed = build_algorithms(factory, site)[2]
+    now = site.mjd()
+
+    # no occurrence has observed_at (nothing ever ran successfully)
+    chosen = timed.next(now, [row])
+    assert chosen is not None
+    # only the most recent due slot (0 h) is offered
+    assert chosen[0].slew_at == pytest.approx(now)
+
+    session = factory()
+    finished = {
+        round((t.execute_at - now) * 24.0): t.finished
+        for t in session.query(model.TimedDB).order_by(model.TimedDB.execute_at)
+    }
+    # the two stale overdue occurrences expired; the current one is live
+    assert finished[-4] is True
+    assert finished[-2] is True
+    assert finished[0] is False
+
+
+def test_timed_without_expire_overdue_keeps_the_backlog(session_factory):
+    """The collapse is opt-in: without expire_overdue every occurrence still
+    runs, back-to-back catch-up included (legacy behaviour)."""
+    site = FakeSite(latitude=0.0, lst_rads=10.0 * math.pi / 12.0)
+    factory = session_factory
+    row = _timed_setup(factory, site, [-4.0, -2.0, 0.0], expire_overdue=False)
+    timed = build_algorithms(factory, site)[2]
+    now = site.mjd()
+
+    chosen = timed.next(now, [row])
+    assert chosen is not None
+    # earliest overdue occurrence served first; none expired
+    assert chosen[0].slew_at == pytest.approx(now - 4.0 / 24.0)
+    session = factory()
+    assert (
+        session.query(model.TimedDB)
+        .filter(model.TimedDB.finished == True)  # noqa: E712
+        .count()
+        == 0
+    )
