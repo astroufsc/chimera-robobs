@@ -306,6 +306,29 @@ def test_start_cleans_stale_scheduler_queue(rob, chimera_session):
     assert chimera_session().query(chimera_model.Program).count() == 1
 
 
+def test_start_while_already_on_keeps_the_running_queue(rob, chimera_session):
+    """A second start() must not wipe the queue: it holds the program the
+    executor is running, and deleting its rows kills the scheduler-program
+    thread with ObjectDeletedError the moment it touches the next action
+    (opd-40 2026-07-26, twice on a focus program that had already begun)."""
+    assert rob.start() is True
+
+    csession = chimera_session()
+    running = chimera_model.Program(name="RUNNING", pi="ME", priority=1)
+    running.actions.append(chimera_model.Expose(frames=1, exptime=1))
+    csession.add(running)
+    csession.commit()
+
+    assert rob.start() is True
+
+    csession = chimera_session()
+    assert csession.query(chimera_model.Program).count() == 1
+    assert csession.query(chimera_model.Action).count() == 1
+    # a deliberate reset still wipes it
+    rob.stop()
+    assert chimera_session().query(chimera_model.Program).count() == 0
+
+
 def test_program_complete_leaves_tracking_to_the_scheduler(rob, chimera_session):
     """robobs must not touch tracking: the stop belongs to the scheduler, which
     issues it inline at program end.  Stopping it from here raced the next

@@ -263,6 +263,20 @@ class RobObs(ChimeraObject):
 
     def start(self) -> bool:
         self.log.debug("Switching robstate on...")
+        if self.rob_state is RobState.ON:
+            # Idempotent: starting an already-running robobs must NOT wipe
+            # the scheduler queue. The queue holds the program the executor
+            # is running right now, and deleting its rows underneath the
+            # scheduler-program thread kills it mid-action - SQLAlchemy
+            # raises ObjectDeletedError as soon as the executor touches the
+            # action it is about to log (opd-40 2026-07-26 03:09 and 03:12:
+            # two starts landed on a focus program that had already begun,
+            # and both times the thread died). A deliberate reset is still
+            # stop() then start().
+            self.log.info(
+                "robobs is already on; leaving the scheduler queue untouched."
+            )
+            return True
         if self["clean_scheduler_on_start"]:
             self._clean_scheduler_queue()
         self.rob_state = RobState.ON
