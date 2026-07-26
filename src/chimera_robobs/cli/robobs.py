@@ -286,6 +286,67 @@ def cmd_add_project(args) -> int:
     return 0
 
 
+def cmd_add_project_inputs(args) -> int:
+    """Ingest one project end to end: project YAML + targets CSV + a single
+    block template, creating one observing block per target.
+
+    Replaces the shell + sqlite3 dance that generated a block list from
+    target row ids: the targets added here are known in-session, so the
+    blocks are attached to them directly - no id bookkeeping, no raw SQL.
+    Re-running updates the project/block parameters (priority, exposure
+    times, ...) in place; run the clean-* commands first for a full reload.
+    """
+    try:
+        project_config = _load_yaml(args.project)
+        block_config = _load_yaml(args.block)
+    except yaml.YAMLError as exc:
+        _err(str(exc))
+        return 1
+
+    from astropy.table import Table
+
+    targets_table = Table.read(args.targets, format="ascii.csv")
+
+    backup_database(args)
+    session = _session_factory(args)()
+    try:
+        project = upsert_project(session, project_config)
+        pid = project.pid
+
+        # the block parameters this project defined (add-project made them);
+        # --blockpar-bid picks one when a project has several, else the sole
+        # one is used (the production projects each have exactly one)
+        blockpars = session.query(BlockPar).filter(BlockPar.pid == pid).all()
+        if not blockpars:
+            _err(f"*Project {pid} defines no observing_blocks; nothing to attach.")
+            return 1
+        if args.blockpar_bid is not None:
+            bid = args.blockpar_bid
+        elif len(blockpars) == 1:
+            bid = blockpars[0].bid
+        else:
+            _err(
+                f"*Project {pid} has {len(blockpars)} block parameters "
+                f"{sorted(bp.bid for bp in blockpars)}; pick one with --blockpar-bid."
+            )
+            return 1
+
+        targets = add_targets_from_table(session, targets_table)
+        if not targets:
+            _err(f"*No targets loaded from {args.targets}.")
+            return 1
+
+        for blockid, target in enumerate(targets, start=1):
+            row = (pid, blockid, target.id, args.block, bid)
+            add_observing_block(session, row, block_config)
+    except ValueError as e:
+        _err(f"*{e}")
+        return 1
+
+    _out(f"-Done: {pid} ({len(targets)} block(s) from {len(targets)} target(s)).")
+    return 0
+
+
 def cmd_delete_project(args) -> int:
     """Delete a project (and related information) from the database."""
     if not args.pid:
@@ -356,10 +417,11 @@ def cmd_clean_project(args) -> int:
 # ----------------------------------------------------------------------
 
 
-def add_targets_from_table(session, targets_table) -> int:
+def add_targets_from_table(session, targets_table) -> list:
     """Add targets from an astropy table (CSV) to the database.
 
-    Returns the number of targets added.  Does not check for duplicates.
+    Returns the list of added :class:`Target` rows (populated ids after the
+    commit), in file order.  Does not check for duplicates.
     """
     columns = {name.lower().strip(): name for name in targets_table.dtype.names}
 
@@ -373,7 +435,7 @@ def add_targets_from_table(session, targets_table) -> int:
     if ignored:
         _out(f"-Ignoring unknown columns: {', '.join(ignored)}")
 
-    nadded = 0
+    added = []
     for i in range(len(targets_table)):
         ra = str(targets_table[columns["ra"]][i]).strip()
         dec = str(targets_table[columns["dec"]][i]).strip()
@@ -398,10 +460,10 @@ def add_targets_from_table(session, targets_table) -> int:
         target = Target(**tpar)
         _out(f"--Adding {target.name}...")
         session.add(target)
-        nadded += 1
+        added.append(target)
 
     session.commit()
-    return nadded
+    return added
 
 
 def cmd_add_targets(args) -> int:
@@ -1639,6 +1701,22 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("add-project", help="add a project (YAML) to the database")
     p.add_argument("-f", "--file", dest="filename", required=True)
     p.set_defaults(func=cmd_add_project)
+
+    p = sub.add_parser(
+        "add-project-inputs",
+        help="ingest a project end to end: project YAML + targets CSV + one "
+        "block template (one block per target); no block-list file needed",
+    )
+    p.add_argument("-p", "--project", required=True, help="project YAML")
+    p.add_argument("-t", "--targets", required=True, help="targets CSV")
+    p.add_argument("-b", "--block", required=True, help="block-template YAML")
+    p.add_argument(
+        "--blockpar-bid",
+        type=int,
+        default=None,
+        help="block-parameter id to attach (default: the project's only one)",
+    )
+    p.set_defaults(func=cmd_add_project_inputs)
 
     p = sub.add_parser("delete-project", help="delete a project from the database")
     p.add_argument("--pid", required=True)

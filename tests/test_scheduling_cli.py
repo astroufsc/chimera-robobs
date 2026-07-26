@@ -376,3 +376,46 @@ def test_pool_lst_start_past_meridian_only():
     widened = cli.pool_lst_start(10.0, {"past_meridian_only": True})
     assert widened == 10.0 - cli.PAST_MERIDIAN_POOL_HOURS
     assert cli.PAST_MERIDIAN_POOL_HOURS >= 4.0
+
+
+def test_add_project_inputs_end_to_end(tmp_path, db):
+    """One command ingests project + targets + block template and attaches
+    one observing block per target - no block-list file, no sqlite3."""
+    proj = _write(tmp_path, "p.yaml", PROJECT_YAML.format(priority=3))
+    targets = _write(tmp_path, "t.csv", TARGETS_CSV)
+    block = _write(tmp_path, "b.yaml", BLOCK_YAML)
+
+    assert _run(db, "add-project-inputs", "-p", proj, "-t", targets, "-b", block) == 0
+
+    session = _session(db)
+    assert session.query(model.Project).one().pid == "P01"
+    # the broken-coord row is skipped: 2 targets -> 2 blocks
+    assert session.query(model.Target).count() == 2
+    blocks = session.query(model.ObsBlock).order_by(model.ObsBlock.blockid).all()
+    assert [b.blockid for b in blocks] == [1, 2]
+    assert {b.pid for b in blocks} == {"P01"}
+    # each block is attached to a real target and carries the template's
+    # actions (pre expose + slew + post expose + point)
+    for b in blocks:
+        assert b.target_id in {t.id for t in session.query(model.Target)}
+        assert len(b.actions) >= 3
+
+
+def test_add_project_inputs_updates_in_place(tmp_path, db):
+    """Re-running with edited YAML updates project/block parameters (the
+    priority/exposure-time edit path), replacing blocks after a clean."""
+    proj = _write(tmp_path, "p.yaml", PROJECT_YAML.format(priority=3))
+    targets = _write(tmp_path, "t.csv", TARGETS_CSV)
+    block = _write(tmp_path, "b.yaml", BLOCK_YAML)
+    assert _run(db, "add-project-inputs", "-p", proj, "-t", targets, "-b", block) == 0
+
+    # edit the priority and reload the project (targets/blocks cleaned first,
+    # as the load script does for a full refresh)
+    _write(tmp_path, "p.yaml", PROJECT_YAML.format(priority=9))
+    assert _run(db, "clean-observing-blocks") == 0
+    assert _run(db, "clean-targets") == 0
+    assert _run(db, "add-project-inputs", "-p", proj, "-t", targets, "-b", block) == 0
+
+    session = _session(db)
+    assert session.query(model.Project).one().priority == 9
+    assert session.query(model.ObsBlock).count() == 2
