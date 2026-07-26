@@ -490,10 +490,34 @@ def cmd_add_targets(args) -> int:
 
 
 def cmd_clean_targets(args) -> int:
-    """Delete all targets from the database."""
+    """Delete targets: all of them, or only those named in a CSV.
+
+    ``--names-from`` deletes just the targets whose NAME appears in the
+    given CSV, so a single project's targets can be dropped for a re-load
+    without wiping the whole table (targets carry no project id). It never
+    touches the observing log or the sky-flat ledger - those are history.
+    """
     backup_database(args)
 
     session = _session_factory(args)()
+
+    names_from = getattr(args, "names_from", None)
+    if names_from:
+        from astropy.table import Table
+
+        table = Table.read(names_from, format="ascii.csv")
+        columns = {name.lower().strip(): name for name in table.dtype.names}
+        if "name" not in columns:
+            _err(f"*{names_from} has no NAME column.")
+            return 1
+        names = {str(v).strip() for v in table[columns["name"]]}
+        targets = session.query(Target).filter(Target.name.in_(names)).all()
+        _out(f"-Deleting {len(targets)} of {len(names)} named target(s) from database")
+        for target in targets:
+            session.delete(target)
+        session.commit()
+        _out("-Done")
+        return 0
 
     ntargets = int(session.query(Target).count())
 
@@ -704,10 +728,19 @@ def add_observing_block(session, row, config) -> ObsBlock | None:
     return addblock
 
 
-def _read_block_list(path: str) -> list[tuple[str, int, int, str, int]]:
+def _read_block_list(
+    path: str, *, by_name: bool = False, block_dir: str | None = None
+) -> list[tuple[str, int, str | int, str, int]]:
     """Parse a block-list file: 5 whitespace-delimited columns
-    ``pid blockid target_id config_yaml_path blockpar_bid`` (the production
-    files mix spaces and tabs; blank lines and #-comments are skipped)."""
+    ``pid blockid target config_yaml_path blockpar_bid`` (the production
+    files mix spaces and tabs; blank lines and #-comments are skipped).
+
+    ``target`` is a row id, or a target NAME when ``by_name`` (``@NAME@``
+    delimiters are stripped) - the caller resolves names against the
+    database, so a per-object list (each line its own block YAML, e.g. the
+    OPOP occultations with per-event exposure times) needs no sqlite id
+    lookup. ``block_dir`` rewrites each YAML path to that directory's copy
+    (the generated lists embed the generating machine's absolute paths)."""
     rows = []
     with open(path) as fp:
         for lineno, line in enumerate(fp, start=1):
@@ -717,9 +750,14 @@ def _read_block_list(path: str) -> list[tuple[str, int, int, str, int]]:
             parts = line.split()
             if len(parts) < 5:
                 raise ValueError(f"{path}:{lineno}: expected 5 columns, got {line!r}")
-            rows.append(
-                (parts[0], int(parts[1]), int(parts[2]), parts[3], int(parts[4]))
-            )
+            if by_name:
+                target: str | int = parts[2].strip("@")
+            else:
+                target = int(parts[2])
+            yaml_path = parts[3]
+            if block_dir:
+                yaml_path = os.path.join(block_dir, os.path.basename(yaml_path))
+            rows.append((parts[0], int(parts[1]), target, yaml_path, int(parts[4])))
     return rows
 
 
@@ -731,8 +769,13 @@ def cmd_add_observing_block(args) -> int:
 
     _out(f"-Reading observing blocks from {args.filename}")
 
+    by_name = getattr(args, "by_name", False)
     try:
-        block_list = _read_block_list(args.filename)
+        block_list = _read_block_list(
+            args.filename,
+            by_name=by_name,
+            block_dir=getattr(args, "block_dir", None),
+        )
     except ValueError as e:
         _err(str(e))
         return 1
@@ -740,7 +783,19 @@ def cmd_add_observing_block(args) -> int:
     backup_database(args)
     session = _session_factory(args)()
 
+    # resolve target names once (by-name lists): a name that add-targets
+    # loaded is known here, so no external id lookup is needed
+    name_to_id = {}
+    if by_name:
+        name_to_id = {t.name: t.id for t in session.query(Target)}
+
     for row in block_list:
+        if by_name:
+            target_id = name_to_id.get(row[2])
+            if target_id is None:
+                _err(f"*target {row[2]!r} not in the database (run add-targets first).")
+                return 1
+            row = (row[0], row[1], target_id, row[3], row[4])
         try:
             config = _load_yaml(row[3])
         except yaml.YAMLError as exc:
@@ -1729,13 +1784,33 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("-f", "--file", dest="filename", required=True)
     p.set_defaults(func=cmd_add_targets)
 
-    p = sub.add_parser("clean-targets", help="delete all targets")
+    p = sub.add_parser(
+        "clean-targets", help="delete all targets, or only those named in a CSV"
+    )
+    p.add_argument(
+        "--names-from",
+        default=None,
+        help="delete only the targets whose NAME appears in this CSV "
+        "(default: delete every target)",
+    )
     p.set_defaults(func=cmd_clean_targets)
 
     p = sub.add_parser(
         "add-observing-block", help="add observing block definitions from a file"
     )
     p.add_argument("-f", "--file", dest="filename", required=True)
+    p.add_argument(
+        "--by-name",
+        action="store_true",
+        help="the target column is a NAME (resolved against the database), "
+        "not a row id - use for per-object lists like the OPOP occultations",
+    )
+    p.add_argument(
+        "--block-dir",
+        default=None,
+        help="rewrite each block-YAML path to this directory's copy "
+        "(the generated lists embed the generating machine's paths)",
+    )
     p.set_defaults(func=cmd_add_observing_block)
 
     p = sub.add_parser("clean-observing-blocks", help="delete all observing blocks")

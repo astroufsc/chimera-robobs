@@ -419,3 +419,78 @@ def test_add_project_inputs_updates_in_place(tmp_path, db):
     session = _session(db)
     assert session.query(model.Project).one().priority == 9
     assert session.query(model.ObsBlock).count() == 2
+
+
+def test_add_observing_block_by_name_and_block_dir(tmp_path, db):
+    """Per-object list: target column is @NAME@, resolved in-tool, and
+    block-YAML paths are localized to --block-dir. This is the OPOP shape -
+    each object its own block/exposure time, no sqlite id lookup."""
+    _run(
+        db,
+        "add-project",
+        "-f",
+        _write(tmp_path, "p.yaml", PROJECT_YAML.format(priority=1)),
+    )
+    _run(db, "add-targets", "-f", _write(tmp_path, "t.csv", TARGETS_CSV))
+
+    # two distinct per-object block YAMLs, in their own dir
+    bdir = tmp_path / "blocks"
+    bdir.mkdir()
+    (bdir / "b1.yaml").write_text(BLOCK_YAML.replace("exptime: 20.5", "exptime: 111"))
+    (bdir / "b2.yaml").write_text(BLOCK_YAML.replace("exptime: 20.5", "exptime: 222"))
+    # the list embeds a DIFFERENT (generating-machine) path; --block-dir wins
+    listfile = _write(
+        tmp_path,
+        "opop.list.in",
+        "P01 1 @NGC0001@ /somewhere/else/b1.yaml 1\n"
+        "P01 2 @NGC0002@ /somewhere/else/b2.yaml 1\n",
+    )
+
+    rc = _run(
+        db, "add-observing-block", "--by-name", "--block-dir", str(bdir), "-f", listfile
+    )
+    assert rc == 0
+
+    session = _session(db)
+    by_target = {
+        session.query(model.Target).get(b.target_id).name: b
+        for b in session.query(model.ObsBlock)
+    }
+    assert set(by_target) == {"NGC0001", "NGC0002"}
+    # each block took its own YAML's exposure time
+    exptimes = {
+        name: [
+            a.exptime for a in b.actions if getattr(a, "exptime", None) in (111, 222)
+        ]
+        for name, b in by_target.items()
+    }
+    assert exptimes["NGC0001"] == [111]
+    assert exptimes["NGC0002"] == [222]
+
+
+def test_add_observing_block_by_name_unknown_target(tmp_path, db):
+    _run(
+        db,
+        "add-project",
+        "-f",
+        _write(tmp_path, "p.yaml", PROJECT_YAML.format(priority=1)),
+    )
+    block = _write(tmp_path, "b.yaml", BLOCK_YAML)
+    listfile = _write(tmp_path, "l.in", f"P01 1 @NOSUCH@ {block} 1\n")
+    assert _run(db, "add-observing-block", "--by-name", "-f", listfile) == 1
+
+
+def test_clean_targets_names_from(tmp_path, db):
+    """Selective delete: only the named targets go, the rest stay."""
+    _run(
+        db, "add-targets", "-f", _write(tmp_path, "t.csv", TARGETS_CSV)
+    )  # NGC0001, NGC0002
+    session = _session(db)
+    assert session.query(model.Target).count() == 2
+
+    only = _write(tmp_path, "drop.csv", "RA,DEC,NAME\n10:00:00,-20:00:00,NGC0001\n")
+    assert _run(db, "clean-targets", "--names-from", only) == 0
+
+    session = _session(db)
+    remaining = [t.name for t in session.query(model.Target)]
+    assert remaining == ["NGC0002"]
