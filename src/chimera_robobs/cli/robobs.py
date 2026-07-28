@@ -420,17 +420,17 @@ def cmd_clean_project(args) -> int:
 def add_targets_from_table(session, targets_table) -> list:
     """Add targets from an astropy table (CSV) to the database.
 
-    Returns the list of :class:`Target` rows (populated ids after the
+    Returns the list of added :class:`Target` rows (populated ids after the
     commit), in file order.
 
-    A target that is already in the database under the same name is UPDATED
-    IN PLACE rather than added again, so its id survives a reload.  The
-    observing log stores target ids, and a delete-and-re-add cycle orphans
-    every id it wrote earlier: on opd-40 2026-07-28 a mid-night reload moved
-    the targets from ids 1-66 to 67-132 and six hours of observations
-    vanished from the progress plot.  Only the first row with a given name
-    in the file may claim an existing target, so a file that genuinely lists
-    a name twice still gets two rows.
+    The table is APPEND-ONLY: rows are never updated and never matched
+    against what is already there.  Names are not unique - two projects may
+    each have a ``std`` or a ``test`` - so there is nothing to match on, and
+    a reload must leave the old rows alone anyway: the observing log stores
+    target ids, and rewriting or deleting them orphans every observation
+    already recorded against them.  A reload appends a fresh set and the
+    project's new blocks point at those; the previous rows stay behind as
+    the history the log refers to.
     """
     columns = {name.lower().strip(): name for name in targets_table.dtype.names}
 
@@ -445,7 +445,6 @@ def add_targets_from_table(session, targets_table) -> list:
         _out(f"-Ignoring unknown columns: {', '.join(ignored)}")
 
     added = []
-    claimed: set[str] = set()
     for i in range(len(targets_table)):
         ra = str(targets_table[columns["ra"]][i]).strip()
         dec = str(targets_table[columns["dec"]][i]).strip()
@@ -467,22 +466,9 @@ def add_targets_from_table(session, targets_table) -> list:
                 else:
                     tpar[column] = str(value).strip()
 
-        name = tpar.get("name")
-        existing = None
-        if name and name not in claimed:
-            existing = session.query(Target).filter(Target.name == name).first()
-        if name:
-            claimed.add(name)
-
-        if existing is not None:
-            for column, value in tpar.items():
-                setattr(existing, column, value)
-            _out(f"--Updating {existing.name} (id {existing.id})...")
-            target = existing
-        else:
-            target = Target(**tpar)
-            _out(f"--Adding {target.name}...")
-            session.add(target)
+        target = Target(**tpar)
+        _out(f"--Adding {target.name}...")
+        session.add(target)
         added.append(target)
 
     session.commit()
@@ -942,11 +928,14 @@ def _pair_observing_log(session, entries, start_marker, end_marker) -> list[dict
         if start_marker in entry.action:
             target = session.query(Target).filter(Target.id == entry.target_id).first()
             if target is None:
-                # A reload (delete-project + clean-targets + add-project-inputs)
-                # re-creates every target with a NEW id, orphaning the ids
-                # already written to the observing log. Resolve on the name the
-                # log also stores, or a mid-night reload silently erases every
-                # program observed before it from the plot.
+                # TEMPORARY, for databases that predate the append-only target
+                # table. `clean-targets` used to run on every reload, deleting
+                # rows the observing log still pointed at, so the whole night
+                # before a reload vanished from the plot (opd-40 2026-07-28).
+                # Names are NOT unique across projects, so this can pick the
+                # wrong row; it is a best effort at recovering history, not a
+                # lookup. Nothing recorded after the append-only change needs
+                # it - delete it once no live database carries orphaned ids.
                 target = session.query(Target).filter(Target.name == entry.name).first()
             if target is None:
                 continue

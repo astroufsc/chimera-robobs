@@ -242,43 +242,56 @@ def test_pair_observing_log_marks_aborted(tmp_path):
     assert programs[2]["end"] == entries[3].time + dt.timedelta(minutes=1)
 
 
-def test_add_targets_keeps_ids_across_a_reload(db, tmp_path):
-    """Re-loading the same target list updates the rows in place: the ids the
-    observing log has already written must stay valid."""
+def test_add_targets_appends_and_never_touches_the_old_rows(db, tmp_path):
+    """The target table is append-only: a reload adds a fresh set and leaves
+    the ids the observing log already refers to exactly as they were."""
     targets = tmp_path / "t.csv"
     targets.write_text(TARGETS_CSV)
 
     assert _run(db, "add-targets", "-f", str(targets)) == 0
     session = _session(db)
-    before = {t.name: t.id for t in session.query(model.Target)}
+    before = {
+        t.id: (t.name, t.target_ra, t.target_dec) for t in session.query(model.Target)
+    }
     assert len(before) == 2
 
-    # the same file again, with one coordinate edited
+    # the same project reloaded, with one coordinate edited
     targets.write_text(TARGETS_CSV.replace("11:00:00,+00:00:00", "11:30:00,+05:00:00"))
     assert _run(db, "add-targets", "-f", str(targets)) == 0
 
     session = _session(db)
-    after = {t.name: t.id for t in session.query(model.Target)}
-    assert after == before, "a reload must not renumber targets"
-    edited = session.query(model.Target).filter(model.Target.name == "T11").one()
-    assert edited.target_ra == pytest.approx(11.5)
-    assert edited.target_dec == pytest.approx(5.0)
+    rows = {
+        t.id: (t.name, t.target_ra, t.target_dec) for t in session.query(model.Target)
+    }
+    assert len(rows) == 4, "a reload appends rather than replacing"
+    for old_id, old_values in before.items():
+        assert rows[old_id] == old_values, "an existing target must not be rewritten"
+    fresh = sorted(set(rows) - set(before))
+    assert rows[fresh[1]][1] == pytest.approx(11.5)
+    assert rows[fresh[1]][2] == pytest.approx(5.0)
 
 
-def test_add_targets_keeps_a_name_repeated_in_one_file(db, tmp_path):
-    """Only the first row may claim an existing target, so a file that really
-    lists a name twice still produces two rows."""
-    targets = tmp_path / "t.csv"
-    targets.write_text("RA,DEC,NAME\n10:00:00,+00:00:00,T10\n12:00:00,+00:00:00,T10\n")
+def test_add_targets_keeps_same_named_targets_apart(db, tmp_path):
+    """Names are not unique - two projects may each have a 'std' - so a name
+    collision must never merge two targets."""
+    first = tmp_path / "a.csv"
+    first.write_text("RA,DEC,NAME\n10:00:00,+00:00:00,std\n")
+    second = tmp_path / "b.csv"
+    second.write_text("RA,DEC,NAME\n22:00:00,-30:00:00,std\n")
 
-    assert _run(db, "add-targets", "-f", str(targets)) == 0
+    assert _run(db, "add-targets", "-f", str(first)) == 0
+    assert _run(db, "add-targets", "-f", str(second)) == 0
+
     session = _session(db)
-    assert session.query(model.Target).filter(model.Target.name == "T10").count() == 2
+    std = session.query(model.Target).filter(model.Target.name == "std").all()
+    assert len(std) == 2
+    assert sorted(round(t.target_ra, 3) for t in std) == [10.0, 22.0]
 
 
-def test_pair_observing_log_survives_a_target_reload(tmp_path):
-    """A reload re-creates targets with new ids; the log's stale target_id
-    must resolve by name instead of dropping the whole pre-reload night."""
+def test_pair_observing_log_recovers_a_legacy_orphaned_target(tmp_path):
+    """Legacy databases carry log rows whose target was deleted by the old
+    clean-targets reload; resolve them by name rather than dropping the
+    whole pre-reload night. Delete this with the fallback itself."""
     import datetime as dt
 
     from chimera_robobs.cli.robobs import _pair_observing_log
