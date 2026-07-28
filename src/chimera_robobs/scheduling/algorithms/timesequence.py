@@ -20,7 +20,18 @@ log = logging.getLogger(__name__)
 class TimeSequence(Higher):
     id = 4
     name = "TIMESEQUENCE"
-    timed_constraint = True
+    # Pair to pin_start_time below. Unpinning alone only MOVES the wait:
+    # the chimera scheduler stops holding the program until slew_at, and
+    # robobs holds it instead (it may not hand an unpinned program over
+    # early). The slot times are still spaced by the estimated block
+    # length, so the idle survives - 337 s per visit on opd-40 2026-07-28,
+    # exactly slot_len minus the real block duration.
+    #
+    # False lets the engine re-time the visit to the earliest instant that
+    # passes check_conditions (engine.reschedule), which is the safe way to
+    # start early: the conditions are re-evaluated AT the earlier time
+    # rather than assumed from the slot's.
+    timed_constraint = False
 
     keep_selected_target = True
     check_end_airmass = False

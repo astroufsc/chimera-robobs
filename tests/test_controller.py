@@ -649,35 +649,49 @@ def test_unpinned_program_is_queued_without_a_start_at_when_due(
     assert not cprogram.start_at  # chimera's "no constraint" sentinel
 
 
-def test_unpinned_program_is_not_queued_before_it_is_due(rob, chimera_session):
-    """Without a start_at the scheduler would run it immediately, so handing
-    it over early would start a block whose conditions were only checked for
-    its later slot time. Wait for it instead."""
-    due_in_seconds = 120.0  # within EMPTY_QUEUE_RETRY: waited exactly
-    _populate_timesequence_program(
-        rob, slew_at=rob._site.mjd() + due_in_seconds / 86400.0
+def test_a_monitoring_visit_with_a_future_slot_is_pulled_forward(
+    rob, chimera_session
+):
+    """The point of the pair (timed_constraint=False + pin_start_time=False):
+    the engine re-times the visit to the earliest instant that passes the
+    conditions, so it is queued NOW rather than at its nominal slot. Under
+    the half-fix this idled for slot_len minus the block duration - 337 s on
+    opd-40 2026-07-28."""
+    _populate_timesequence_program(rob, slew_at=rob._site.mjd() + 600.0 / 86400.0)
+    rob.rob_state = RobState.ON
+
+    assert rob._handle_scheduler_idle() == 0.0
+
+    cprogram = chimera_session().query(chimera_model.Program).one()
+    assert cprogram.name == "WASP-145A"
+    assert not cprogram.start_at  # and chimera will not hold it either
+
+
+def test_an_unpinned_program_the_engine_could_not_re_time_is_not_queued_early(
+    rob, chimera_session, monkeypatch
+):
+    """The guard still matters when the engine leaves slew_at in the future
+    (nothing observable earlier): queueing then would start a block whose
+    conditions were only checked for the later time, because without a
+    start_at the scheduler runs it the moment it is queued."""
+    program = _populate_timesequence_program(rob, slew_at=rob._site.mjd())
+    session = rob._session()
+    row = (
+        session.merge(program),
+        session.query(model.BlockPar).one(),
+        session.query(model.ObsBlock).one(),
+        session.query(model.Target).one(),
     )
+    # the engine hands back a program it did NOT manage to pull earlier
+    row[0].slew_at = rob._site.mjd() + 120.0 / 86400.0
+    monkeypatch.setattr(rob.engine, "reschedule", lambda *a, **k: row)
     rob.rob_state = RobState.ON
 
     delay = rob._handle_scheduler_idle()
 
-    assert delay == pytest.approx(due_in_seconds, abs=5.0)
+    assert delay == pytest.approx(120.0, abs=5.0)
     assert chimera_session().query(chimera_model.Program).count() == 0
-    # and nothing was consumed on the robobs side
-    assert rob._session().query(model.Program).one().finished is False
     assert not rob._handed
-
-
-def test_a_far_off_unpinned_program_still_re_polls_within_the_retry_window(
-    rob, chimera_session
-):
-    """The wait is capped so robobs keeps re-evaluating: conditions change,
-    and higher-priority work can appear while a monitor waits its turn."""
-    _populate_timesequence_program(rob, slew_at=rob._site.mjd() + 3600.0 / 86400.0)
-    rob.rob_state = RobState.ON
-
-    assert rob._handle_scheduler_idle() == EMPTY_QUEUE_RETRY
-    assert chimera_session().query(chimera_model.Program).count() == 0
 
 
 def test_pinned_program_is_still_queued_early_with_its_start_at(

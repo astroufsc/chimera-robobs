@@ -257,3 +257,18 @@ def test_slot_len_is_derived_from_the_block_when_not_configured():
         higher._slot_len({}, None, blocks=[SimpleNamespace(length=None)])
         == Higher.default_slot_len
     )
+
+
+def test_a_monitoring_visit_can_be_pulled_earlier_than_its_slot():
+    """Unpinning start_at only moves the wait from the chimera scheduler to
+    robobs unless the engine may also re-time the visit: opd-40 2026-07-28
+    idled 337 s after a focus run, exactly slot_len minus the real block.
+    timed_constraint=False is what lets reschedule() pull it forward, with
+    the conditions re-checked at the earlier instant."""
+    assert TimeSequence.timed_constraint is False  # may start early
+    assert TimeSequence.pin_start_time is False  # and is not held by chimera
+
+    # the pair that must stay put: a time that means something
+    assert Timed.timed_constraint is True
+    assert Recurrent.timed_constraint is True
+    assert SkyFlat.timed_constraint is True
