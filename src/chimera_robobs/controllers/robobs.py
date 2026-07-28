@@ -24,6 +24,7 @@ from chimera.controllers.scheduler.states import State as SchedState
 from chimera.controllers.scheduler.status import SchedulerStatus
 from chimera.core.chimeraobject import ChimeraObject
 from chimera.core.constants import SYSTEM_CONFIG_DIRECTORY
+from sqlalchemy import or_
 
 from chimera_robobs.scheduling.algorithms import build_algorithms
 from chimera_robobs.scheduling.dates import datetime_from_mjd
@@ -183,6 +184,11 @@ class RobObs(ChimeraObject):
         # events resolve their robobs program here (in-memory, so the offer
         # stamps like _timed_request_id survive to observed())
         self._handed = {}
+        # chimera program ids whose program_begin was seen: a completion for
+        # a program that never began belongs to something else (a wiped
+        # queue reusing rowids) or to a program the scheduler dropped
+        # without running it - either way it must not credit an observation
+        self._begun = set()
         self._no_program_on_queue = False
         self.machine = None
         self.engine = None
@@ -295,61 +301,128 @@ class RobObs(ChimeraObject):
         self.rob_state = RobState.ON
         return True
 
+    def _running_program_id(self):
+        """Id of the chimera program the scheduler is executing right now.
+
+        ``None`` when nothing is running, or when the scheduler cannot say
+        (an older core without ``current_program()``, an unreachable bus) -
+        the caller then behaves as it always did.
+        """
+        try:
+            current = self.get_scheduler().current_program()
+        except Exception as e:
+            self.log.warning(
+                "Could not ask the scheduler which program is running (%s); "
+                "cleaning the whole queue.",
+                e,
+            )
+            return None
+        if not current:
+            return None
+        # JSON-safe snapshot ({id, name, pi, priority}) on current cores
+        if isinstance(current, dict):
+            return current.get("id")
+        return getattr(current, "id", None)
+
     def _clean_scheduler_queue(self):
         """Delete every queued chimera scheduler program (recovered
         mysql-branch behavior, e91e84f): a stale queue left by a previous
         run would otherwise be re-executed.
 
-        Removal must be RECOVERABLE: a stop used to permanently lose every
-        handed-over program that had not run yet - the robobs side had
-        already marked them finished, so nothing re-offered them and only
-        a full replan rebuilt the night (2026-07-22, twice, 55 programs).
-        Handed-but-unrun programs are un-finished here, and their timed
-        occurrences un-committed, so the next start re-offers them.
+        The program the scheduler is EXECUTING is left alone. Deleting it
+        pulls the row out from under the scheduler-program thread, which
+        then dies on sqlalchemy's ObjectDeletedError as soon as it logs the
+        program it just aborted - every operator lock during a program did
+        this (opd-40 2026-07-28; the abort landed 6 min after the delete).
+        And once the queue empties, sqlite hands the freed rowid to the
+        next program handed over, so the running program's completion is
+        applied to whichever program inherited its id (2026-07-26: eta Car
+        recorded as observed out of a bias run's completion).
+
+        Removal must also be RECOVERABLE: a stop used to permanently lose
+        every handed-over program that had not run yet - the robobs side
+        had already marked them finished, so nothing re-offered them and
+        only a full replan rebuilt the night (2026-07-22, twice, 55
+        programs). Handed-but-unrun programs are un-finished here, and
+        their timed occurrences un-committed, so the next start re-offers
+        them.
         """
         csession = chimera_model.Session()
         rsession = self._session()
+        running_id = self._running_program_id()
         try:
             programs = csession.query(chimera_model.Program).all()
-            pending_ids = {p.id for p in programs if not p.finished}
+            kept_id = None
+            pending_ids = set()
+            ran_ids = set()
+            removed = 0
             for program in programs:
+                if program.id == running_id and not program.finished:
+                    kept_id = program.id
+                    self.log.info(
+                        "Keeping program #%s: the scheduler is executing it.",
+                        program.id,
+                    )
+                    continue
+                if program.finished:
+                    ran_ids.add(program.id)
+                else:
+                    pending_ids.add(program.id)
                 csession.delete(program)
-            if programs:
+                removed += 1
+            if removed:
                 self.log.info(
                     "Removed %i stale program(s) from the scheduler queue.",
-                    len(programs),
+                    removed,
                 )
 
-            # the wiped queue invalidates every in-memory hand-over record
-            self._handed.clear()
+            # the wiped queue invalidates every in-memory hand-over record,
+            # except the one still executing
+            for program_id in list(self._handed):
+                if program_id != kept_id:
+                    self._forget_handover(program_id)
 
+            # Handed-but-unrun programs, recognised by either marker: a
+            # `chimera_id` that was still queued, or `handed_at` set with no
+            # completion ever applied. The second is what brings back a
+            # program whose chimera row had already vanished - a
+            # scheduler.db wipe or a queue rebuild used to leave it
+            # finished=1, chimera_id=NULL and unobservable forever
+            # (2026-07-26: BRUCH's 3.4 h block and four focus runs, an
+            # empty night that only a full replan fixed).
             recovered = 0
-            if pending_ids:
-                rows = (
-                    rsession.query(Program, BlockPar)
-                    .join(BlockPar, Program.blockpar_id == BlockPar.id)
-                    .filter(
-                        Program.finished == True,  # noqa: E712
+            rows = (
+                rsession.query(Program, BlockPar)
+                .join(BlockPar, Program.blockpar_id == BlockPar.id)
+                .filter(
+                    Program.finished == True,  # noqa: E712
+                    or_(
                         Program.chimera_id.in_(pending_ids),
-                    )
-                    .all()
+                        Program.handed_at != None,  # noqa: E711
+                    ),
                 )
-                for rprogram, blockpar in rows:
-                    rprogram.finished = False
-                    rprogram.chimera_id = None
-                    algorithm = self._algorithms.get(blockpar.sched_algorithm)
-                    if algorithm is not None:
-                        algorithm.uncommitted(rprogram)
-                    recovered += 1
+                .all()
+            )
+            for rprogram, blockpar in rows:
+                if kept_id is not None and rprogram.chimera_id == kept_id:
+                    continue  # still executing: its own completion decides
+                if rprogram.chimera_id in ran_ids:
+                    # it RAN (the scheduler marks its row finished on
+                    # success): re-offering it would observe it twice
+                    rprogram.handed_at = None
+                    continue
+                self.log.info("Recovering handed-but-unrun program %s.", rprogram)
+                self._recover_program(rprogram, blockpar.sched_algorithm)
+                recovered += 1
             if recovered:
                 self.log.info(
                     "Recovered %i handed-but-unrun program(s) for re-offer.",
                     recovered,
                 )
 
-            # Every link is dead once the queue is wiped - and it MUST be
-            # cleared, not just ignored: sqlite reuses program ids once the
-            # table empties, so a stale link from a previous queue
+            # Every other link is dead once the queue is wiped - and it MUST
+            # be cleared, not just ignored: sqlite reuses program ids once
+            # the table empties, so a stale link from a previous queue
             # generation matches a new queue's ids and the recovery
             # un-finishes a program that RAN (8 recovered vs 7 removed,
             # 2026-07-23 02:39).
@@ -358,10 +431,25 @@ class RobObs(ChimeraObject):
                 .filter(Program.chimera_id != None)  # noqa: E711
                 .all()
             ):
-                lingering.chimera_id = None
+                if lingering.chimera_id != kept_id:
+                    lingering.chimera_id = None
         finally:
             rsession.commit()
             csession.commit()
+
+    def _recover_program(self, rprogram, sched_algorithm):
+        """Put a handed-but-unrun program back on offer."""
+        rprogram.finished = False
+        rprogram.chimera_id = None
+        rprogram.handed_at = None
+        algorithm = self._algorithms.get(sched_algorithm)
+        if algorithm is not None:
+            algorithm.uncommitted(rprogram)
+
+    def _forget_handover(self, program_id):
+        """Drop the in-memory record of a handed-over chimera program."""
+        self._handed.pop(program_id, None)
+        self._begun.discard(program_id)
 
     def stop(self) -> bool:
         self.log.debug("Switching robstate off...")
@@ -457,12 +545,18 @@ class RobObs(ChimeraObject):
         )
 
     def _add_observing_log(self, rsession, program, action: str):
+        """Log an entry for a CHIMERA scheduler program (``tid`` naming)."""
+        self._log_observation(
+            rsession, program.tid, program.name, program.priority, action
+        )
+
+    def _log_observation(self, rsession, target_id, name, priority, action: str):
         rsession.add(
             ObservingLog(
                 time=datetime_from_mjd(self._site.mjd()).replace(tzinfo=None),
-                target_id=program.tid,
-                name=program.name,
-                priority=program.priority,
+                target_id=target_id,
+                name=name,
+                priority=priority,
                 action=action,
             )
         )
@@ -477,6 +571,10 @@ class RobObs(ChimeraObject):
                 self.log.warning("Unknown program id %s started", program_id)
                 return
             self.log.debug("Program %s started", program)
+            # only a program that actually STARTED may later be credited
+            # with an observation (see _watch_program_complete)
+            if program_id in self._handed:
+                self._begun.add(program_id)
             # frames counted from here on belong to this program
             self._flat_frames = {}
             self._add_observing_log(rsession, program, "ROBOBS: Program Started")
@@ -500,6 +598,25 @@ class RobObs(ChimeraObject):
             # block eaten by the first focus completion of the night).
             info = self._handed.get(program_id)
 
+            if (
+                status == SchedulerStatus.OK
+                and info is not None
+                and program_id not in self._begun
+            ):
+                # A SUCCESS for a program that never emitted program_begin is
+                # not this program's success. It happens when the queue is
+                # rewritten under a running program and sqlite hands its
+                # rowid to the next handover (2026-07-26: a hand-loaded bias
+                # run's completion marked eta Car observed without the
+                # telescope ever pointing at it), and on the scheduler's own
+                # no-run path ("Program not valid anymore"), where crediting
+                # an observation would be just as wrong. Failures need no
+                # such guard - they credit nothing either way.
+                self._handle_completion_without_begin(
+                    rsession, program_id, program, info, status, message
+                )
+                return
+
             if program is not None:
                 self._add_observing_log(
                     rsession,
@@ -511,14 +628,12 @@ class RobObs(ChimeraObject):
                 # on success the scheduler deletes its row before this event
                 # arrives: log the End from the robobs program instead
                 robobs_program = rsession.merge(info[0])
-                rsession.add(
-                    ObservingLog(
-                        time=datetime_from_mjd(self._site.mjd()).replace(tzinfo=None),
-                        target_id=robobs_program.target_id,
-                        name=robobs_program.name,
-                        priority=robobs_program.priority,
-                        action=f"ROBOBS: Program End with status {status}({message})",
-                    )
+                self._log_observation(
+                    rsession,
+                    robobs_program.target_id,
+                    robobs_program.name,
+                    robobs_program.priority,
+                    f"ROBOBS: Program End with status {status}({message})",
                 )
                 rsession.commit()
 
@@ -526,6 +641,9 @@ class RobObs(ChimeraObject):
                 self._consecutive_errors = 0
                 cp = rsession.merge(info[0])
                 cp.finished = True
+                # the handover is settled: this program ran
+                cp.handed_at = None
+                info[0].handed_at = None
                 rsession.commit()
 
                 if self._flat_frames:
@@ -541,7 +659,20 @@ class RobObs(ChimeraObject):
                 sched.observed(self._site.mjd(), info)
                 rsession.commit()
 
-                self._handed.pop(program_id, None)
+                self._forget_handover(program_id)
+            elif status == SchedulerStatus.ABORTED:
+                # An abort is an operator decision (a stop, a lock, the
+                # weather), not a program failure: it must not count towards
+                # max_consecutive_errors. The program did not run, so its
+                # handover stays open and the next queue clean re-offers it -
+                # aborted programs used to stay finished=True with a dead
+                # chimera link and were simply lost.
+                self.log.info(
+                    "Program %s was aborted (%s); leaving it for re-offer.",
+                    program_id,
+                    message,
+                )
+                self._forget_handover(program_id)
             elif status != SchedulerStatus.OK:
                 # A single program failure must cost ONE program, not the
                 # night. The old self.stop() here turned every failed focus
@@ -552,7 +683,14 @@ class RobObs(ChimeraObject):
                 # stays committed, so it is not retried; just drop the
                 # in-memory link and let the machine pick the next program.
                 # Only a RUN of failures (camera/dome down) stops robobs.
-                self._handed.pop(program_id, None)
+                if info is not None:
+                    failed = rsession.merge(info[0])
+                    # the attempt is spent: keep it finished so the next
+                    # queue clean does not re-offer a program that failed
+                    failed.handed_at = None
+                    info[0].handed_at = None
+                    rsession.commit()
+                self._forget_handover(program_id)
                 self._consecutive_errors += 1
                 limit = int(self["max_consecutive_errors"])
                 if self._consecutive_errors >= limit:
@@ -573,6 +711,50 @@ class RobObs(ChimeraObject):
         finally:
             csession.commit()
             rsession.commit()
+
+    def _handle_completion_without_begin(
+        self, rsession, program_id, program, info, status, message
+    ):
+        """Deal with a completion event for a handed program that never ran.
+
+        Two shapes, told apart by the chimera row: still queued and unrun
+        means the event belonged to something else (a rowid reused after the
+        queue was rewritten) and this program is still waiting its turn;
+        anything else means the scheduler dropped it without executing it,
+        so the handover is released and the program goes back on offer.
+        """
+        if program is not None and not program.finished:
+            self.log.warning(
+                "Ignoring a completion for program #%s (%s): it never "
+                "started and is still queued - the event belongs to a "
+                "program that held this id before.",
+                program_id,
+                status,
+            )
+            return
+
+        self.log.warning(
+            "Program #%s completed (%s: %s) without ever starting; "
+            "recovering %s for re-offer.",
+            program_id,
+            status,
+            message,
+            info[0],
+        )
+        rprogram = rsession.merge(info[0])
+        self._log_observation(
+            rsession,
+            rprogram.target_id,
+            rprogram.name,
+            rprogram.priority,
+            f"ROBOBS: Program never started ({status}); recovered for re-offer",
+        )
+        self._recover_program(rprogram, info[1].sched_algorithm)
+        info[0].finished = False
+        info[0].chimera_id = None
+        info[0].handed_at = None
+        rsession.commit()
+        self._forget_handover(program_id)
 
     def _watch_flat_expose_complete(self, filter_id, i_flat, exp_time, sky_level):
         """Count each sky-flat frame per filter as the controller takes it."""
@@ -654,23 +836,26 @@ class RobObs(ChimeraObject):
                     return min(due_in, EMPTY_QUEUE_RETRY)
 
             self.log.debug("Adding program %s to scheduler and starting.", program)
-            cprogram = program.chimera_program(
-                pin_start_time=algorithm.pin_start_time
-            )
+            cprogram = program.chimera_program(pin_start_time=algorithm.pin_start_time)
             for act in obs_block.actions:
                 cprogram.actions.append(act.chimera_action())
             csession.add(cprogram)
             csession.commit()
+            handed_at = self._site.mjd()
             program.finished = True
             # remember which chimera program this became: it is what lets a
             # later stop un-finish exactly the programs that never ran
             program.chimera_id = cprogram.id
+            # ... and that it was only HANDED, not observed: the link alone
+            # dies with the chimera row, this outlives it
+            program.handed_at = handed_at
             session.commit()
             # keep the in-memory row in sync: the completion handler merges
             # it back, and merging the stale state CLOBBERED the link (an
             # OPOP program lost its chimera_id that way, 2026-07-23)
             program_info[0].finished = True
             program_info[0].chimera_id = cprogram.id
+            program_info[0].handed_at = handed_at
             # tell the algorithm its offer was taken: consumption must not
             # happen in next() (the engine polls every queue while choosing)
             self._algorithms[program_info[1].sched_algorithm].committed(program_info)
