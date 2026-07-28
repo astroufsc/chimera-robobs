@@ -7,6 +7,9 @@ The script boots a full chimera stack (bus/manager/scheduler/robobs) and
 must therefore live in its own process: it needs an isolated ``HOME``
 *before* any chimera import, and the bus is known to hang the interpreter
 at exit (the script os._exits).  See fast_night.py for what is asserted.
+
+The script arms its own (shorter) deadline, so a hang is reported as a
+failure with thread stacks rather than as this bare subprocess timeout.
 """
 
 import os
