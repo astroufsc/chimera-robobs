@@ -187,6 +187,31 @@ def test_add_observing_block(tmp_path, db):
     assert session.query(model.Action).count() == 4
 
 
+def test_block_length_overheads_are_configurable(tmp_path, db):
+    """The readout and focus-sweep budgets are properties of the CAMERA, not
+    of the scheduler: opd-40's QHY600 measured ~2.8 s/frame against the
+    12 s default, which made every block ~4x too long - and that number
+    lands in the night-end fit check, the derived slot length and the
+    process-queue simulation alike."""
+    _run(
+        db,
+        "add-project",
+        "-f",
+        _write(tmp_path, "p.yaml", PROJECT_YAML.format(priority=1)),
+    )
+    _run(db, "add-targets", "-f", _write(tmp_path, "t.csv", TARGETS_CSV))
+    block_yaml = _write(tmp_path, "block.yaml", BLOCK_YAML)
+    blocks_txt = _write(tmp_path, "blocks.txt", f"P01 1 1 {block_yaml} 1\n")
+
+    assert (
+        _run(db, "add-observing-block", "--readout-overhead", "2.8", "-f", blocks_txt)
+        == 0
+    )
+
+    block = _session(db).query(model.ObsBlock).one()
+    assert block.length == pytest.approx((20.5 + 2.8) * 2)
+
+
 def test_clean_commands_backup_the_robobs_database(tmp_path, db):
     _run(
         db,

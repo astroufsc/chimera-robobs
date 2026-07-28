@@ -308,6 +308,7 @@ def cmd_add_project_inputs(args) -> int:
     targets_table = Table.read(args.targets, format="ascii.csv")
 
     backup_database(args)
+    overheads = ingest_overheads(args)
     session = _session_factory(args)()
     try:
         project = upsert_project(session, project_config)
@@ -338,7 +339,7 @@ def cmd_add_project_inputs(args) -> int:
 
         for blockid, target in enumerate(targets, start=1):
             row = (pid, blockid, target.id, args.block, bid)
-            add_observing_block(session, row, block_config)
+            add_observing_block(session, row, block_config, overheads)
     except ValueError as e:
         _err(f"*{e}")
         return 1
@@ -630,7 +631,14 @@ def _make_action(actconfig, target, block, with_offsets) -> object:
 
 
 #: read-out and focus-sweep overheads (seconds) used for the stored block
-#: length, hard-coded as in the legacy tool
+#: length. Defaults inherited from the legacy tool - they are properties of
+#: the CAMERA (and of its binning and compression), not of the scheduler, so
+#: no single number is right for every deployment: opd-40's QHY600 at 1x1
+#: with fits_rice measured ~2.8 s per frame against these 12, and a focus
+#: block ~270 s against these 600, i.e. block lengths ~4x too long. Override
+#: per ingest with --readout-overhead / --autofocus-overhead; the stored
+#: `obsblock.length` feeds the night-end fit check, the derived slot length
+#: and the process-queue simulation alike.
 INGEST_READOUT_OVERHEAD = 12.0
 INGEST_AUTOFOCUS_OVERHEAD = 600.0
 #: per-frame budget of an autoflat action: the sky-flat controller decides
@@ -638,11 +646,48 @@ INGEST_AUTOFOCUS_OVERHEAD = 600.0
 INGEST_AUTOFLAT_FRAME_OVERHEAD = 60.0
 
 
-def add_observing_block(session, row, config) -> ObsBlock | None:
+def ingest_overheads(args=None) -> dict:
+    """Block-length overheads (seconds) for one ingest run."""
+    return {
+        "readout": getattr(args, "readout_overhead", None) or INGEST_READOUT_OVERHEAD,
+        "autofocus_sweep": getattr(args, "autofocus_overhead", None)
+        or INGEST_AUTOFOCUS_OVERHEAD,
+        "autoflat_frame": getattr(args, "autoflat_frame_overhead", None)
+        or INGEST_AUTOFLAT_FRAME_OVERHEAD,
+    }
+
+
+def _add_overhead_options(parser):
+    parser.add_argument(
+        "--readout-overhead",
+        type=float,
+        default=INGEST_READOUT_OVERHEAD,
+        help="seconds added per exposure for readout when estimating a "
+        f"block's length (default: {INGEST_READOUT_OVERHEAD:.0f}; measure "
+        "it for your camera, binning and compression)",
+    )
+    parser.add_argument(
+        "--autofocus-overhead",
+        type=float,
+        default=INGEST_AUTOFOCUS_OVERHEAD,
+        help="seconds budgeted for one autofocus sweep when estimating a "
+        f"block's length (default: {INGEST_AUTOFOCUS_OVERHEAD:.0f})",
+    )
+    parser.add_argument(
+        "--autoflat-frame-overhead",
+        type=float,
+        default=INGEST_AUTOFLAT_FRAME_OVERHEAD,
+        help="seconds budgeted per sky-flat frame when estimating a block's "
+        f"length (default: {INGEST_AUTOFLAT_FRAME_OVERHEAD:.0f})",
+    )
+
+
+def add_observing_block(session, row, config, overheads=None) -> ObsBlock | None:
     """Add (or replace) one observing block from a block-list row.
 
     ``row`` is ``(pid, blockid, target_id, config_filename, blockpar_bid)``
     and ``config`` the parsed block YAML (with ``pre-actions``/``pos-actions``).
+    ``overheads`` are the block-length estimates (see :func:`ingest_overheads`).
     """
     pid, blockid, target_id, _, bparid = row
 
@@ -717,12 +762,8 @@ def add_observing_block(session, row, config) -> ObsBlock | None:
         addblock.actions.append(act)
 
     # only post-slew actions count towards the stored block length
-    addblock.length = block_duration(
-        post_actions,
-        readout=INGEST_READOUT_OVERHEAD,
-        autofocus_sweep=INGEST_AUTOFOCUS_OVERHEAD,
-        autoflat_frame=INGEST_AUTOFLAT_FRAME_OVERHEAD,
-    )
+    addblock.length = block_duration(post_actions, **(overheads or ingest_overheads()))
+    _out(f"Estimated block length: {addblock.length:.0f} s")
     session.add(addblock)
     session.commit()
     return addblock
@@ -783,6 +824,8 @@ def cmd_add_observing_block(args) -> int:
     backup_database(args)
     session = _session_factory(args)()
 
+    overheads = ingest_overheads(args)
+
     # resolve target names once (by-name lists): a name that add-targets
     # loaded is known here, so no external id lookup is needed
     name_to_id = {}
@@ -802,7 +845,7 @@ def cmd_add_observing_block(args) -> int:
             _err(str(exc))
             return 1
         try:
-            add_observing_block(session, row, config)
+            add_observing_block(session, row, config, overheads)
         except ValueError as e:
             _err(str(e))
             return 1
@@ -924,9 +967,7 @@ def _pair_observing_log(session, entries, start_marker, end_marker) -> list[dict
                 # already written to the observing log. Resolve on the name the
                 # log also stores, or a mid-night reload silently erases every
                 # program observed before it from the plot.
-                target = (
-                    session.query(Target).filter(Target.name == entry.name).first()
-                )
+                target = session.query(Target).filter(Target.name == entry.name).first()
             if target is None:
                 continue
             if current is not None:  # previous program never ended: aborted
@@ -1778,6 +1819,7 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="block-parameter id to attach (default: the project's only one)",
     )
+    _add_overhead_options(p)
     p.set_defaults(func=cmd_add_project_inputs)
 
     p = sub.add_parser("delete-project", help="delete a project from the database")
@@ -1818,6 +1860,7 @@ def main(argv: list[str] | None = None) -> int:
         help="rewrite each block-YAML path to this directory's copy "
         "(the generated lists embed the generating machine's paths)",
     )
+    _add_overhead_options(p)
     p.set_defaults(func=cmd_add_observing_block)
 
     p = sub.add_parser("clean-observing-blocks", help="delete all observing blocks")
