@@ -199,9 +199,25 @@ class Higher(BaseScheduleAlgorithm):
             for i in range(len(radec_array)):
                 worker(i)
 
+            # A block that cannot END before the night does is not a
+            # candidate for this slot. Slots are laid on a fixed cadence and
+            # only their START was bounded by the window, so with slot_len
+            # longer than the block the last slot carried a block that runs
+            # past dawn: check_conditions then rejected it on every poll for
+            # the rest of the night, the project's queue never emptied, and
+            # a process-queue preview reported 0.00 h open shutter for a
+            # fully booked night (opd-40 2026-07-27, EXOPL slot 19/19).
+            # (sliced like worker() indexes it: one entry per candidate
+            # position, which is all of moon_par once a target is dropped)
+            lengths = moon_par["length"][: len(radec_array)]
+            fits_mask = obs_slots["start"][itr] + lengths / SECONDS_PER_DAY <= obs_end
+
             # Create the eligibility mask (moon constraints + meridian side)
             moon_mask = np.bitwise_and(
-                target_par["moon_distance"] > target_par["min_moon_distance"],
+                np.bitwise_and(
+                    target_par["moon_distance"] > target_par["min_moon_distance"],
+                    fits_mask,
+                ),
                 np.bitwise_and(target_par["moon_bright_ok"], target_par["meridian_ok"]),
             )
 
@@ -209,7 +225,15 @@ class Higher(BaseScheduleAlgorithm):
             masked_radec_pos = radec_pos[moon_mask]
 
             if len(masked_radec_pos) == 0:
-                log.warning("Slot[%03i]: Could not find suitable target", itr + 1)
+                if not fits_mask.any():
+                    log.info(
+                        "Slot[%03i]@%.4f: no block short enough to finish "
+                        "before the night ends. Dropping this slot.",
+                        itr + 1,
+                        obs_slots["start"][itr],
+                    )
+                else:
+                    log.warning("Slot[%03i]: Could not find suitable target", itr + 1)
                 continue
 
             alt = target_par["altitude"][moon_mask]

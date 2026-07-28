@@ -110,6 +110,36 @@ def test_higher_allocates_highest_and_removes_selected(
     assert scheduled == [1, 2]
 
 
+def test_a_slot_whose_block_runs_past_the_night_end_is_dropped(
+    session_factory, algorithms, site
+):
+    """Slots are laid on a fixed cadence and only their START was bounded by
+    the observing window, so a slot_len longer than the block put a block
+    that ends after dawn on the queue. It could never run: check_conditions
+    rejected it on every poll for the rest of the night ('Block finish @
+    08:22:03. Night end is @ 08:18:54!'), the project's queue never
+    emptied, and a process-queue preview of a fully booked night reported
+    0.00 h of open shutter (opd-40 2026-07-27, EXOPL 19/19)."""
+    session = session_factory()
+    for blockid, ra_hours in ((1, 10.0), (2, 11.0)):
+        block = _add_block(session, ra_hours=ra_hours, blockid=blockid)
+        block.length = 1.5 * 3600.0  # longer than the slot cadence
+    session.commit()
+
+    obs_start, obs_end = _window()  # 2 h, so two 1 h slots
+    slots = algorithms[0].process(
+        obs_start=obs_start,
+        obs_end=obs_end,
+        query=_query(session),
+        config={"slot_len": 3600.0},
+    )
+
+    # the second slot starts 1 h in: its 1.5 h block would end 30 min after
+    # the night does
+    scheduled = [b for b in slots["blockid"] if b > 0]
+    assert scheduled == [1]
+
+
 def test_timesequence_keeps_selected_target(session_factory, algorithms, site):
     session = session_factory()
     _add_block(session, ra_hours=10.5, blockid=1, sched_algorithm=4)
