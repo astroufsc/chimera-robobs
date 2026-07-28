@@ -242,6 +242,52 @@ def test_pair_observing_log_marks_aborted(tmp_path):
     assert programs[2]["end"] == entries[3].time + dt.timedelta(minutes=1)
 
 
+def test_pair_observing_log_survives_a_target_reload(tmp_path):
+    """A reload re-creates targets with new ids; the log's stale target_id
+    must resolve by name instead of dropping the whole pre-reload night."""
+    import datetime as dt
+
+    from chimera_robobs.cli.robobs import _pair_observing_log
+
+    factory = model.open_database(str(tmp_path / "robobs.db"))
+    session = factory()
+    old = model.Target(name="tgt", target_ra=10.0, target_dec=0.0)
+    session.add(old)
+    session.commit()
+    stale_id = old.id
+
+    # what robobs_load_inputs.sh does: delete every target, add them back.
+    # The id is explicit because sqlite would otherwise hand the fresh row
+    # the rowid it just freed, which is exactly the case that never broke.
+    session.delete(old)
+    session.commit()
+    session.add(
+        model.Target(id=stale_id + 100, name="tgt", target_ra=10.0, target_dec=0.0)
+    )
+    session.commit()
+    assert (
+        session.query(model.Target).filter(model.Target.id == stale_id).first() is None
+    )
+
+    t0 = dt.datetime(2026, 7, 6, 1, 0, 0)
+    entries = [
+        model.ObservingLog(
+            time=t0 + dt.timedelta(minutes=m),
+            target_id=stale_id,
+            name="tgt",
+            action=action,
+        )
+        for m, action in (
+            (0, "ROBOBS: Program Started"),
+            (10, "ROBOBS: Program End with status OK(None)"),
+        )
+    ]
+    programs = _pair_observing_log(session, entries, "Program Started", "Program End")
+    assert len(programs) == 1
+    assert programs[0]["name"] == "tgt"
+    assert programs[0]["ra"] == 10.0
+
+
 def test_pid_config_overrides_stored_scheduling(populated, fake_connect, tmp_path):
     """--pid-config is a per-night override on top of the project's stored
     scheduling section."""

@@ -919,6 +919,15 @@ def _pair_observing_log(session, entries, start_marker, end_marker) -> list[dict
         if start_marker in entry.action:
             target = session.query(Target).filter(Target.id == entry.target_id).first()
             if target is None:
+                # A reload (delete-project + clean-targets + add-project-inputs)
+                # re-creates every target with a NEW id, orphaning the ids
+                # already written to the observing log. Resolve on the name the
+                # log also stores, or a mid-night reload silently erases every
+                # program observed before it from the plot.
+                target = (
+                    session.query(Target).filter(Target.name == entry.name).first()
+                )
+            if target is None:
                 continue
             if current is not None:  # previous program never ended: aborted
                 current["end"] = entry.time
@@ -927,9 +936,7 @@ def _pair_observing_log(session, entries, start_marker, end_marker) -> list[dict
             # project code for the color grouping (the log stores targets,
             # not projects: resolve through the queue programs)
             queue_program = (
-                session.query(Program)
-                .filter(Program.target_id == entry.target_id)
-                .first()
+                session.query(Program).filter(Program.target_id == target.id).first()
             )
             # sky-flat blocks point at a placeholder target (often below the
             # horizon at flat time): the plot draws them at the flat
@@ -952,15 +959,15 @@ def _pair_observing_log(session, entries, start_marker, end_marker) -> list[dict
                 # are both chronological, so pair them sequentially (a
                 # nearest-slew_at match misassigns delayed blocks: they
                 # are planned 60 s apart but run for minutes).
-                if entry.target_id not in flat_program_iters:
-                    flat_program_iters[entry.target_id] = iter(
+                if target.id not in flat_program_iters:
+                    flat_program_iters[target.id] = iter(
                         session.query(Program)
-                        .filter(Program.target_id == entry.target_id)
+                        .filter(Program.target_id == target.id)
                         .order_by(Program.slew_at)
                         .all()
                     )
                 queue_program = (
-                    next(flat_program_iters[entry.target_id], None) or queue_program
+                    next(flat_program_iters[target.id], None) or queue_program
                 )
                 block = (
                     session.query(ObsBlock)
