@@ -9,8 +9,18 @@ when available, a site adapter) via
 module-level globals to configure.
 """
 
+import logging
+
 from chimera.core.exceptions import ChimeraException
 from sqlalchemy.orm import sessionmaker
+
+log = logging.getLogger(__name__)
+
+#: seconds added to a derived slot length to cover the slew and dome sync
+#: between two blocks (they are not predictable; this is a floor, and an
+#: unpinned algorithm does not depend on it being right - see
+#: Algorithm.pin_start_time)
+SLOT_SLEW_ALLOWANCE = 60.0
 
 
 class ExtinctionMonitorError(ChimeraException):
@@ -44,6 +54,20 @@ class BaseScheduleAlgorithm:
     #: whether the program's ``slew_at`` is a hard constraint (the engine
     #: only searches for an earlier feasible start when this is False)
     timed_constraint: bool = True
+
+    #: whether ``slew_at`` must be copied to the chimera program's
+    #: ``start_at``, i.e. enforced by the chimera scheduler as a "do not
+    #: start before" barrier.
+    #:
+    #: True for anything whose time carries meaning (a focus cadence, an
+    #: occultation, a twilight flat).  False for algorithms whose slot
+    #: times are only an artefact of laying blocks out across the night:
+    #: there the barrier turns every difference between the ESTIMATED and
+    #: the real block duration into dead time, because slew and dome-sync
+    #: costs are not predictable.  A program from an unpinned algorithm is
+    #: handed to the scheduler only once it is actually due, and then runs
+    #: as soon as the telescope is free (see RobObs._handle_scheduler_idle).
+    pin_start_time: bool = True
 
     #: twilight-calibration programs (sky flats) run outside the -18 deg
     #: night window on a placeholder target: the engine skips its night /
@@ -130,11 +154,47 @@ class BaseScheduleAlgorithm:
     def soft_clean(self, pid, block=None):
         """Soft clean: erase only information about past observations."""
 
-    def _slot_len(self, config, slot_len):
-        """Resolve the slot length: the pid-config ``slot_len`` wins, then
-        the caller's ``slot_len``, then the per-algorithm default."""
+    def _slot_len(self, config, slot_len, blocks=None):
+        """Resolve the slot length, in seconds.
+
+        Order: the pid-config ``slot_len`` wins, then the caller's
+        ``slot_len``, then a value DERIVED from the blocks being scheduled,
+        then the per-algorithm default.
+
+        The derived value is the longest block in the set plus
+        :data:`SLOT_SLEW_ALLOWANCE`.  It exists so a project need not
+        restate a number the database already knows: ``obsblock.length`` is
+        computed from the block's own actions at ingest.  Getting it wrong
+        by hand is expensive - a slot longer than its block is dead sky on
+        every visit (opd-40 2026-07-27: 1500 s configured against a 985 s
+        block, 8.6 min idle per visit).
+        """
         if config and "slot_len" in config:
             return float(config["slot_len"])
         if slot_len is not None:
             return float(slot_len)
+        derived = self._derived_slot_len(blocks)
+        if derived is not None:
+            log.info(
+                "%s: no slot_len configured; using %.0f s derived from the "
+                "longest block (+%.0f s for the slew)",
+                self.name,
+                derived,
+                SLOT_SLEW_ALLOWANCE,
+            )
+            return derived
         return self.default_slot_len
+
+    @staticmethod
+    def _derived_slot_len(blocks) -> float | None:
+        """Longest stored block length + slew allowance, or None."""
+        if not blocks:
+            return None
+        lengths = [
+            float(block.length)
+            for block in blocks
+            if getattr(block, "length", None)
+        ]
+        if not lengths:
+            return None
+        return max(lengths) + SLOT_SLEW_ALLOWANCE

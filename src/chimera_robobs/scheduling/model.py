@@ -361,8 +361,15 @@ class Program(Base):
             f"| target: {self.target_id}]"
         )
 
-    def chimera_program(self):
-        """Convert to a chimera scheduler ``Program`` (without actions)."""
+    def chimera_program(self, pin_start_time: bool = True):
+        """Convert to a chimera scheduler ``Program`` (without actions).
+
+        ``pin_start_time=False`` leaves ``start_at`` unset, so the chimera
+        scheduler runs the program as soon as the telescope is free instead
+        of holding it until ``slew_at``.  The caller is then responsible for
+        handing the program over only when it is actually due — see
+        :attr:`~chimera_robobs.scheduling.algorithms.base.Algorithm.pin_start_time`.
+        """
         from chimera.controllers.scheduler.model import Program as CProgram
 
         cp = CProgram()
@@ -377,8 +384,12 @@ class Program(Base):
         cp.priority = -self.priority
         cp.created_at = self.created_at
         cp.finished = self.finished
-        # legacy slewAt/exposeAt were merged into chimera 0.2's start_at
-        cp.start_at = self.slew_at
+        # legacy slewAt/exposeAt were merged into chimera 0.2's start_at.
+        # 0.0 is chimera's "no constraint" sentinel, not a time: the machine
+        # tests `if program.start_at:` before waiting, and the column
+        # defaults to 0.0 anyway - set it explicitly rather than leaving it
+        # to the default of a column in another project's schema.
+        cp.start_at = self.slew_at if pin_start_time else 0.0
         return cp
 
 

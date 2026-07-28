@@ -25,6 +25,16 @@ class TimeSequence(Higher):
     keep_selected_target = True
     check_end_airmass = False
 
+    # A monitoring sequence has no meaningful per-visit start time: the
+    # slots exist only so the allocator can hand out N visits across the
+    # night. Pinning them made every visit wait for its nominal slot, so
+    # the difference between the estimated block length and the real one
+    # became dead sky - 8.6 min per 25 min slot on opd-40 2026-07-27,
+    # where 30 x 30 s took 985 s against a 1260 s estimate. Unpinned, each
+    # visit starts when the previous ends, whatever the slew and dome
+    # actually cost.
+    pin_start_time = False
+
     def observed(self, time, program, soft=False):
         """Never marks a block as observed, so it can go back to the queue
         as long as it is the most suitable one."""

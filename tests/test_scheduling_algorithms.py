@@ -207,3 +207,53 @@ def test_extinction_monitor_add_clean(session_factory, algorithms):
     extmoni.clean("P01")
     session = session_factory()
     assert session.query(model.ExtMoniDB).count() == 0
+
+
+# --------------------------------------------------------------------------
+# start-time pinning and derived slot lengths
+# --------------------------------------------------------------------------
+
+
+def test_only_packing_algorithms_leave_the_start_time_unpinned():
+    """`start_at` is a hard 'do not start before' barrier in the chimera
+    scheduler. It belongs to algorithms whose time carries meaning; for a
+    monitoring sequence the slot times are a packing artefact, and pinning
+    them turned every over-estimate of the block length into dead sky."""
+    assert Timed.pin_start_time is True  # focus cadence, occultations
+    assert Recurrent.pin_start_time is True
+    assert SkyFlat.pin_start_time is True
+    assert TimeSequence.pin_start_time is False
+
+
+def test_unpinned_program_carries_no_start_at():
+    program = model.Program(
+        target_id=1, name="WASP-145A", pi="", priority=25, slew_at=61249.022
+    )
+
+    pinned = program.chimera_program()
+    assert pinned.start_at == 61249.022
+
+    unpinned = program.chimera_program(pin_start_time=False)
+    # 0.0 is chimera's "no constraint" sentinel (machine: `if start_at:`)
+    assert not unpinned.start_at
+    # everything else must still cross over
+    assert unpinned.name == "WASP-145A"
+    assert unpinned.priority == -25
+
+
+def test_slot_len_is_derived_from_the_block_when_not_configured():
+    higher = Higher(None)
+    blocks = [SimpleNamespace(length=985.0), SimpleNamespace(length=600.0)]
+
+    # explicit config always wins
+    assert higher._slot_len({"slot_len": 1500.0}, None, blocks=blocks) == 1500.0
+    # then the caller's value
+    assert higher._slot_len({}, 1200.0, blocks=blocks) == 1200.0
+    # then the longest block plus the slew allowance
+    assert higher._slot_len({}, None, blocks=blocks) == 985.0 + 60.0
+    # and the per-algorithm default when there is nothing to derive from
+    assert higher._slot_len({}, None, blocks=[]) == Higher.default_slot_len
+    assert (
+        higher._slot_len({}, None, blocks=[SimpleNamespace(length=None)])
+        == Higher.default_slot_len
+    )

@@ -601,3 +601,95 @@ def test_queue_clean_clears_every_stale_link(rob, chimera_session):
     ran = session.query(model.Program).one()
     assert ran.finished is True, "a program that ran was spuriously recovered"
     assert ran.chimera_id is None, "stale link survived the queue wipe"
+
+
+def _populate_timesequence_program(controller, slew_at):
+    """A monitoring (TIMESEQUENCE) program, whose start time is not pinned."""
+    session = controller._session()
+    target = model.Target(name="WASP-145A", target_ra=10.0, target_dec=0.0)
+    session.add(target)
+    session.commit()
+    blockpar = model.BlockPar(bid=1, pid="EXOPL")
+    blockpar.sched_algorithm = 4  # TIMESEQUENCE
+    session.add(blockpar)
+    session.commit()
+    block = model.ObsBlock(
+        target_id=target.id, blockid=1, pid="EXOPL", block_par_id=blockpar.id
+    )
+    block.actions.append(model.Expose(frames=1, exptime=1.0))
+    session.add(block)
+    session.commit()
+    program = model.Program(
+        target_id=target.id,
+        name=target.name,
+        priority=25,
+        slew_at=slew_at,
+        pid="EXOPL",
+        obsblock_id=block.id,
+        blockpar_id=blockpar.id,
+    )
+    session.add(program)
+    session.commit()
+    return program
+
+
+def test_unpinned_program_is_queued_without_a_start_at_when_due(
+    rob, chimera_session
+):
+    """A monitoring visit runs as soon as the telescope is free: no start_at,
+    so the scheduler cannot hold it for a slot time computed from an
+    estimated block length (opd-40 2026-07-27: 8.6 min idle per 25 min slot)."""
+    _populate_timesequence_program(rob, slew_at=rob._site.mjd() - 0.01)  # overdue
+    rob.rob_state = RobState.ON
+
+    assert rob._handle_scheduler_idle() == 0.0
+
+    cprogram = chimera_session().query(chimera_model.Program).one()
+    assert cprogram.name == "WASP-145A"
+    assert not cprogram.start_at  # chimera's "no constraint" sentinel
+
+
+def test_unpinned_program_is_not_queued_before_it_is_due(rob, chimera_session):
+    """Without a start_at the scheduler would run it immediately, so handing
+    it over early would start a block whose conditions were only checked for
+    its later slot time. Wait for it instead."""
+    due_in_seconds = 120.0  # within EMPTY_QUEUE_RETRY: waited exactly
+    _populate_timesequence_program(
+        rob, slew_at=rob._site.mjd() + due_in_seconds / 86400.0
+    )
+    rob.rob_state = RobState.ON
+
+    delay = rob._handle_scheduler_idle()
+
+    assert delay == pytest.approx(due_in_seconds, abs=5.0)
+    assert chimera_session().query(chimera_model.Program).count() == 0
+    # and nothing was consumed on the robobs side
+    assert rob._session().query(model.Program).one().finished is False
+    assert not rob._handed
+
+
+def test_a_far_off_unpinned_program_still_re_polls_within_the_retry_window(
+    rob, chimera_session
+):
+    """The wait is capped so robobs keeps re-evaluating: conditions change,
+    and higher-priority work can appear while a monitor waits its turn."""
+    _populate_timesequence_program(rob, slew_at=rob._site.mjd() + 3600.0 / 86400.0)
+    rob.rob_state = RobState.ON
+
+    assert rob._handle_scheduler_idle() == EMPTY_QUEUE_RETRY
+    assert chimera_session().query(chimera_model.Program).count() == 0
+
+
+def test_pinned_program_is_still_queued_early_with_its_start_at(
+    rob, chimera_session
+):
+    """The unpinned path must not change the ordinary one: a timed program
+    is handed over ahead of time and held by the scheduler's start_at."""
+    slew_at = rob._site.mjd() + 900.0 / 86400.0
+    _populate_program(rob, slew_at=slew_at)
+    rob.rob_state = RobState.ON
+
+    assert rob._handle_scheduler_idle() == 0.0
+
+    cprogram = chimera_session().query(chimera_model.Program).one()
+    assert cprogram.start_at == pytest.approx(slew_at)

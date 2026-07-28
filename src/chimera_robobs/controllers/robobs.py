@@ -39,6 +39,12 @@ from chimera_robobs.scheduling.siteadapter import SiteAdapter
 #: how long to wait before retrying when the robobs queue is empty (seconds)
 EMPTY_QUEUE_RETRY = 300.0
 
+#: seconds of slack allowed when deciding an unpinned program is "due":
+#: shorter than a slew, so waiting it out costs nothing
+UNPINNED_DUE_TOLERANCE = 30.0
+
+SECONDS_PER_DAY = 86400.0
+
 
 class RobState(enum.Enum):
     OFF = "OFF"
@@ -626,8 +632,31 @@ class RobObs(ChimeraObject):
         if program_info is not None:
             program = session.merge(program_info[0])
             obs_block = session.merge(program_info[2])
+            algorithm = self._algorithms[program_info[1].sched_algorithm]
+
+            # An UNPINNED program carries no start_at, so the chimera
+            # scheduler would run it the moment it is queued. Handing one
+            # over early would therefore start a block whose conditions the
+            # engine only validated for its (later) slot time - the target
+            # can still be below the airmass limit now. Wait for it instead:
+            # the machine wakes up when it is due and hands it over then.
+            if not algorithm.pin_start_time:
+                due_in = (program.slew_at - self._site.mjd()) * SECONDS_PER_DAY
+                if due_in > UNPINNED_DUE_TOLERANCE:
+                    self.log.debug(
+                        "%s is not due for %.1f s and its start time is not "
+                        "pinned; waiting instead of queueing it early.",
+                        program,
+                        due_in,
+                    )
+                    csession.commit()
+                    session.commit()
+                    return min(due_in, EMPTY_QUEUE_RETRY)
+
             self.log.debug("Adding program %s to scheduler and starting.", program)
-            cprogram = program.chimera_program()
+            cprogram = program.chimera_program(
+                pin_start_time=algorithm.pin_start_time
+            )
             for act in obs_block.actions:
                 cprogram.actions.append(act.chimera_action())
             csession.add(cprogram)

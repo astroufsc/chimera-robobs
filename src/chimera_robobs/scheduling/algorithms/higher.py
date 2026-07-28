@@ -49,7 +49,9 @@ class Higher(BaseScheduleAlgorithm):
 
     def process(self, *, obs_start, obs_end, query, config=None, slot_len=None):
         config = config or {}
-        slot_len = self._slot_len(config, slot_len)
+        # rows are (ObsBlock, BlockPar, Target): with no slot_len configured
+        # the blocks' own stored lengths decide it
+        slot_len = self._slot_len(config, slot_len, blocks=[row[0] for row in query])
         if "pool_size" in config:
             # accepted for input compatibility, but ignored: chimera 0.2's
             # bus client matches responses by source URL only, so concurrent
