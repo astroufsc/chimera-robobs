@@ -420,8 +420,17 @@ def cmd_clean_project(args) -> int:
 def add_targets_from_table(session, targets_table) -> list:
     """Add targets from an astropy table (CSV) to the database.
 
-    Returns the list of added :class:`Target` rows (populated ids after the
-    commit), in file order.  Does not check for duplicates.
+    Returns the list of :class:`Target` rows (populated ids after the
+    commit), in file order.
+
+    A target that is already in the database under the same name is UPDATED
+    IN PLACE rather than added again, so its id survives a reload.  The
+    observing log stores target ids, and a delete-and-re-add cycle orphans
+    every id it wrote earlier: on opd-40 2026-07-28 a mid-night reload moved
+    the targets from ids 1-66 to 67-132 and six hours of observations
+    vanished from the progress plot.  Only the first row with a given name
+    in the file may claim an existing target, so a file that genuinely lists
+    a name twice still gets two rows.
     """
     columns = {name.lower().strip(): name for name in targets_table.dtype.names}
 
@@ -436,6 +445,7 @@ def add_targets_from_table(session, targets_table) -> list:
         _out(f"-Ignoring unknown columns: {', '.join(ignored)}")
 
     added = []
+    claimed: set[str] = set()
     for i in range(len(targets_table)):
         ra = str(targets_table[columns["ra"]][i]).strip()
         dec = str(targets_table[columns["dec"]][i]).strip()
@@ -457,9 +467,22 @@ def add_targets_from_table(session, targets_table) -> list:
                 else:
                     tpar[column] = str(value).strip()
 
-        target = Target(**tpar)
-        _out(f"--Adding {target.name}...")
-        session.add(target)
+        name = tpar.get("name")
+        existing = None
+        if name and name not in claimed:
+            existing = session.query(Target).filter(Target.name == name).first()
+        if name:
+            claimed.add(name)
+
+        if existing is not None:
+            for column, value in tpar.items():
+                setattr(existing, column, value)
+            _out(f"--Updating {existing.name} (id {existing.id})...")
+            target = existing
+        else:
+            target = Target(**tpar)
+            _out(f"--Adding {target.name}...")
+            session.add(target)
         added.append(target)
 
     session.commit()
@@ -924,9 +947,7 @@ def _pair_observing_log(session, entries, start_marker, end_marker) -> list[dict
                 # already written to the observing log. Resolve on the name the
                 # log also stores, or a mid-night reload silently erases every
                 # program observed before it from the plot.
-                target = (
-                    session.query(Target).filter(Target.name == entry.name).first()
-                )
+                target = session.query(Target).filter(Target.name == entry.name).first()
             if target is None:
                 continue
             if current is not None:  # previous program never ended: aborted
@@ -1034,8 +1055,19 @@ def cmd_plot_log(args) -> int:
         dusk_aware = site.sunset_twilight_end(times.obs_end - dt.timedelta(hours=24))
         dawn = site.sunrise_twilight_begin(dusk_aware).replace(tzinfo=None)
         dusk = dusk_aware.replace(tzinfo=None)
-        x_lo = min(obs_start, dusk)
-        x_hi = max(obs_end, dawn)
+
+        # Frame the axis on the SUN, not on the query window: --date-start/
+        # --date-end are deliberately generous (plot_night_progress.sh asks
+        # for 20:00-13:00 UT so one window covers both sides of UT midnight)
+        # and letting them drive the axis left hours of empty daylight on the
+        # right of every plot. site.sunset() returns the NEXT sunset after the
+        # date it is given, so anchor on UT noon of the dusk date.
+        noon = dusk.replace(hour=12, minute=0, second=0, microsecond=0)
+        sunset = site.sunset(noon).replace(tzinfo=None)
+        sunrise = site.sunrise(sunset).replace(tzinfo=None)
+        margin = dt.timedelta(minutes=30)
+        x_lo = sunset - margin
+        x_hi = sunrise + margin
 
         if args.simulation:
             start_marker = "Simulation: Acquisition Start"
@@ -1058,6 +1090,11 @@ def cmd_plot_log(args) -> int:
             _err("*No matching observing-log entries in the selected window.")
             return 1
 
+        # the sun window is the frame, not a filter: widen it rather than clip
+        # anything that really ran outside it (a daytime test, a long abort)
+        x_lo = min([x_lo] + [p["start"] for p in programs])
+        x_hi = max([x_hi] + [p["end"] for p in programs])
+
         def altitude(ra, dec, when):
             return site.ra_dec_to_alt_az(ra, dec, site.lst_in_rads(when))[0]
 
@@ -1068,7 +1105,7 @@ def cmd_plot_log(args) -> int:
         # plot was made (off-scale and invisible when plotting a past night)
         for boundary in (dusk, dawn):
             ax.plot([boundary, boundary], [alt_min, alt_max], "r--")
-        ax.plot([x_lo - pad, x_hi + pad], [alt_min + 10] * 2, "r--")
+        ax.plot([x_lo, x_hi], [alt_min + 10] * 2, "r--")
         now = site.ut().replace(tzinfo=None)
         ax.plot([now, now], [alt_min, alt_max], "b--", label=f"plotted {now:%H:%M}")
 
@@ -1135,7 +1172,7 @@ def cmd_plot_log(args) -> int:
 
         kind = "Simulation" if args.simulation else "Observed"
         ax.set_title(f"robobs {kind} — night of {dusk.date()}")
-        ax.set_xlim(x_lo - pad, x_hi + pad)
+        ax.set_xlim(x_lo, x_hi)
         ax.set_ylim(alt_min, alt_max)
         ax.set_ylabel("Altitude (deg)")
         ax.xaxis.set_major_formatter(DateFormatter("%H:%M"))

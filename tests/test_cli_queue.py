@@ -242,6 +242,40 @@ def test_pair_observing_log_marks_aborted(tmp_path):
     assert programs[2]["end"] == entries[3].time + dt.timedelta(minutes=1)
 
 
+def test_add_targets_keeps_ids_across_a_reload(db, tmp_path):
+    """Re-loading the same target list updates the rows in place: the ids the
+    observing log has already written must stay valid."""
+    targets = tmp_path / "t.csv"
+    targets.write_text(TARGETS_CSV)
+
+    assert _run(db, "add-targets", "-f", str(targets)) == 0
+    session = _session(db)
+    before = {t.name: t.id for t in session.query(model.Target)}
+    assert len(before) == 2
+
+    # the same file again, with one coordinate edited
+    targets.write_text(TARGETS_CSV.replace("11:00:00,+00:00:00", "11:30:00,+05:00:00"))
+    assert _run(db, "add-targets", "-f", str(targets)) == 0
+
+    session = _session(db)
+    after = {t.name: t.id for t in session.query(model.Target)}
+    assert after == before, "a reload must not renumber targets"
+    edited = session.query(model.Target).filter(model.Target.name == "T11").one()
+    assert edited.target_ra == pytest.approx(11.5)
+    assert edited.target_dec == pytest.approx(5.0)
+
+
+def test_add_targets_keeps_a_name_repeated_in_one_file(db, tmp_path):
+    """Only the first row may claim an existing target, so a file that really
+    lists a name twice still produces two rows."""
+    targets = tmp_path / "t.csv"
+    targets.write_text("RA,DEC,NAME\n10:00:00,+00:00:00,T10\n12:00:00,+00:00:00,T10\n")
+
+    assert _run(db, "add-targets", "-f", str(targets)) == 0
+    session = _session(db)
+    assert session.query(model.Target).filter(model.Target.name == "T10").count() == 2
+
+
 def test_pair_observing_log_survives_a_target_reload(tmp_path):
     """A reload re-creates targets with new ids; the log's stale target_id
     must resolve by name instead of dropping the whole pre-reload night."""
