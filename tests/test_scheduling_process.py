@@ -675,7 +675,7 @@ def test_timed_process_stores_min_gap(session_factory, site):
         obs_end=obs_end,
         query=_query(session),
         config={
-            "times": [0, 2, 6],
+            "times": [0, 0.5, 1.5],
             "pid": "P01",
             "slot_len": 3600.0,
             "expire_overdue": True,
@@ -688,8 +688,80 @@ def test_timed_process_stores_min_gap(session_factory, site):
         for t in session.query(model.TimedDB).order_by(model.TimedDB.execute_at)
     ]
     assert gaps[0] == pytest.approx(0.0)  # first occurrence never expires
-    assert gaps[1] == pytest.approx(2.0 / 24.0)
-    assert gaps[2] == pytest.approx(4.0 / 24.0)
+    assert gaps[1] == pytest.approx(0.5 / 24.0)
+    assert gaps[2] == pytest.approx(1.0 / 24.0)
+
+
+class _FixedDuskSite(RotatingSite):
+    """A site whose evening twilight is a known instant, as a real Site
+    reports it for a night already in progress."""
+
+    def __init__(self, dusk, **kwargs):
+        super().__init__(**kwargs)
+        self._dusk = dusk
+
+    def sunset_twilight_end(self, date=None):
+        return self._dusk
+
+
+def test_timed_numeric_times_count_from_dusk_not_from_the_window_start(
+    session_factory,
+):
+    """`times: [0, 1.5]` means 0 h and 1.5 h AFTER DUSK. Replanning
+    mid-night moves the window start (--tonight sets it to now), and
+    anchoring there rebased the whole cadence: on 2026-07-28 a 04:00 UT
+    replan of `[0, 3, 6, 10]` produced 04:00/07:00/10:00/14:00, i.e. two
+    runs after dawn and none of the intended ones."""
+    factory = session_factory
+    session = factory()
+    _add_block(session, ra_hours=10.0, blockid=1, sched_algorithm=2)
+
+    dusk = UT  # the night opened an hour before this plan was built
+    site = _FixedDuskSite(
+        dusk,
+        latitude=0.0,
+        lst_rads=NIGHT_START_LST_HOURS * math.pi / 12.0,
+        ut_now=UT + dt.timedelta(hours=1),
+    )
+    obs_start = jd_from_datetime(dusk) + 1.0 / 24.0  # replanning mid-night
+    obs_end = jd_from_datetime(dusk) + NIGHT_HOURS / 24.0
+
+    build_algorithms(factory, site)[2].process(
+        obs_start=obs_start,
+        obs_end=obs_end,
+        query=_query(session),
+        config={"times": [0, 1.5], "pid": "P01", "slot_len": 3600.0},
+    )
+
+    session = factory()
+    stored = [t.execute_at for t in session.query(model.TimedDB)]
+    # 0 h after dusk has passed and is dropped; 1.5 h after dusk stands
+    assert len(stored) == 1
+    assert stored[0] == pytest.approx(
+        jd_from_datetime(dusk) + 1.5 / 24.0 - MJD_JD_OFFSET
+    )
+
+
+def test_timed_process_drops_occurrences_outside_the_night(session_factory, site):
+    """Nothing should generate work that provably cannot run: an occurrence
+    past the end of the night sat in `timeddb` unrunnable - and, with no
+    later occurrence to supersede it, unexpirable - until the next replan
+    (opd-40 2026-07-28: two of four focus runs placed after dawn)."""
+    factory = session_factory
+    session = factory()
+    _add_block(session, ra_hours=10.0, blockid=1, sched_algorithm=2)
+
+    obs_start, obs_end = _window()  # a 2 h window
+    build_algorithms(factory, site)[2].process(
+        obs_start=obs_start,
+        obs_end=obs_end,
+        query=_query(session),
+        config={"times": [0, 1, 6], "pid": "P01", "slot_len": 3600.0},
+    )
+
+    session = factory()
+    stored = [t.execute_at for t in session.query(model.TimedDB)]
+    assert len(stored) == 2, "an occurrence after dawn was queued anyway"
 
 
 # ----------------------------------------------------------------------
