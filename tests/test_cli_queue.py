@@ -335,6 +335,51 @@ def test_pair_observing_log_recovers_a_legacy_orphaned_target(tmp_path):
     assert programs[0]["ra"] == 10.0
 
 
+def test_pair_observing_log_drops_an_orphan_whose_name_is_ambiguous(tmp_path):
+    """Target names are not unique across projects, so the by-name recovery of
+    an orphaned entry must refuse to guess: drawing the entry at another
+    target's altitude is worse than leaving it off the plot. Delete this with
+    the fallback itself."""
+    import datetime as dt
+
+    from chimera_robobs.cli.robobs import _pair_observing_log
+
+    factory = model.open_database(str(tmp_path / "robobs.db"))
+    session = factory()
+    old = model.Target(name="std", target_ra=10.0, target_dec=0.0)
+    session.add(old)
+    session.commit()
+    stale_id = old.id
+    session.delete(old)
+    session.commit()
+
+    # two projects, each with a target called "std" — the shape the fallback
+    # cannot tell apart, at opposite sides of the sky
+    session.add(
+        model.Target(id=stale_id + 100, name="std", target_ra=10.0, target_dec=0.0)
+    )
+    session.add(
+        model.Target(id=stale_id + 101, name="std", target_ra=200.0, target_dec=-40.0)
+    )
+    session.commit()
+
+    t0 = dt.datetime(2026, 7, 6, 1, 0, 0)
+    entries = [
+        model.ObservingLog(
+            time=t0 + dt.timedelta(minutes=m),
+            target_id=stale_id,
+            name="std",
+            action=action,
+        )
+        for m, action in (
+            (0, "ROBOBS: Program Started"),
+            (10, "ROBOBS: Program End with status OK(None)"),
+        )
+    ]
+    programs = _pair_observing_log(session, entries, "Program Started", "Program End")
+    assert programs == []
+
+
 def test_pid_config_overrides_stored_scheduling(populated, fake_connect, tmp_path):
     """--pid-config is a per-night override on top of the project's stored
     scheduling section."""

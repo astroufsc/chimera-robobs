@@ -924,6 +924,7 @@ def _pair_observing_log(session, entries, start_marker, end_marker) -> list[dict
     programs = []
     current = None
     flat_program_iters: dict[int, object] = {}
+    ambiguous_names: set[str] = set()
     for entry in entries:
         if start_marker in entry.action:
             target = session.query(Target).filter(Target.id == entry.target_id).first()
@@ -932,11 +933,22 @@ def _pair_observing_log(session, entries, start_marker, end_marker) -> list[dict
                 # table. `clean-targets` used to run on every reload, deleting
                 # rows the observing log still pointed at, so the whole night
                 # before a reload vanished from the plot (opd-40 2026-07-28).
-                # Names are NOT unique across projects, so this can pick the
-                # wrong row; it is a best effort at recovering history, not a
-                # lookup. Nothing recorded after the append-only change needs
-                # it - delete it once no live database carries orphaned ids.
-                target = session.query(Target).filter(Target.name == entry.name).first()
+                # Names are NOT unique across projects, so resolve by name only
+                # when exactly one target carries it: drawing an entry at
+                # another target's altitude is worse than leaving a pre-reload
+                # night off the plot. Nothing recorded after the append-only
+                # change needs this - delete it once no live database carries
+                # orphaned ids.
+                matches = (
+                    session.query(Target)
+                    .filter(Target.name == entry.name)
+                    .limit(2)
+                    .all()
+                )
+                if len(matches) == 1:
+                    target = matches[0]
+                elif matches:
+                    ambiguous_names.add(entry.name)
             if target is None:
                 continue
             if current is not None:  # previous program never ended: aborted
@@ -1009,6 +1021,11 @@ def _pair_observing_log(session, entries, start_marker, end_marker) -> list[dict
         current["end"] = current["start"] + dt.timedelta(minutes=1)
         current["aborted"] = True
         programs.append(current)
+    if ambiguous_names:
+        _err(
+            "*Left off the plot: orphaned log entries whose name matches more "
+            f"than one target ({', '.join(sorted(ambiguous_names))})."
+        )
     return programs
 
 
