@@ -118,6 +118,8 @@ def test_make_queue_end_to_end(populated, fake_connect):
     programs = session.query(model.Program).order_by(model.Program.slew_at).all()
     assert len(programs) == 2
     assert {p.pid for p in programs} == {"P01"}
+    # the project's PI reaches the queue, and from there the PROG_PI header
+    assert {p.pi for p in programs} == {"A. Investigator"}
     assert programs[0].name == "T10"  # culminates first
     assert programs[1].name == "T11"
 
