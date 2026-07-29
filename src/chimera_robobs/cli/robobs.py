@@ -125,6 +125,7 @@ PID_CONFIG_KEYS = {
     "flat_window",
     "n_filters",
     "lookback",
+    "flat_sun_alt",
 }
 
 #: legacy CSV column names -> Target columns.  The production pointing CSVs
@@ -924,9 +925,7 @@ def _pair_observing_log(session, entries, start_marker, end_marker) -> list[dict
                 # already written to the observing log. Resolve on the name the
                 # log also stores, or a mid-night reload silently erases every
                 # program observed before it from the plot.
-                target = (
-                    session.query(Target).filter(Target.name == entry.name).first()
-                )
+                target = session.query(Target).filter(Target.name == entry.name).first()
             if target is None:
                 continue
             if current is not None:  # previous program never ended: aborted

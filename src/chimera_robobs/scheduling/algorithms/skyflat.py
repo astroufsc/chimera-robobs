@@ -34,6 +34,12 @@ Scheduling config (project ``scheduling:`` section or ``--pid-config``):
     selection excludes the blocks already picked for the evening.
 ``lookback``
     ledger look-back window in days (default 15, as on T80S).
+``flat_sun_alt``
+    sun altitude in DEGREES at which the sky-flat controller can first
+    expose in the morning — normally its own ``sun_alt_low``.  The morning
+    set is anchored there instead of at the night's end, so the sky in
+    between stays available to the science programs.  Unset, the morning
+    window starts at dawn exactly as before.
 """
 
 import datetime as dt
@@ -63,6 +69,13 @@ SUN_ALT_LOW = -25.0
 #: only fixes the execution order — the actual pace is set by the sky-flat
 #: controller waiting for the right sky level
 STAGGER = 60.0
+
+#: how far past dawn ``flat_sun_alt`` is searched for, and how finely. The
+#: sun climbs from -18 deg to 0 in well under three hours at any latitude
+#: this runs at; 30 bisections resolve that span to under a tenth of a
+#: second, far below the minute the flats are staggered by.
+SUN_CROSSING_SEARCH_HOURS = 3.0
+SUN_CROSSING_ITERATIONS = 30
 
 
 def _block_filters(block) -> list[str]:
@@ -180,9 +193,19 @@ class SkyFlat(BaseScheduleAlgorithm):
                     start,
                 )
 
+        # The morning set is anchored where the CONTROLLER can first expose,
+        # not where the night ends. Handing it the telescope at dawn(-18)
+        # when its own sun_alt_low is -8 buys nothing: the flat controller
+        # simply waits, and the sky in between - perfectly usable for the
+        # brighter programs - is spent parked (opd-40 2026-07-29: 46 min
+        # from the -18 anchor at 08:18 to the first exposable frame at
+        # 09:17). Unset, this is the -18 dawn exactly as before.
+        flat_sun_alt = config.get("flat_sun_alt")
+        if morning_rows and flat_sun_alt is not None:
+            dawn = self._sun_alt_crossing(dawn, float(flat_sun_alt))
+
         for i, row in enumerate(morning_rows):
-            # morning: sky brightens — most sensitive filters first,
-            # starting right at the -18 deg dawn
+            # morning: sky brightens — most sensitive filters first
             start = dawn + i * STAGGER / 86400.0
             slots.append((start, start, len(slots), row[0].blockid))
             log.info(
@@ -194,6 +217,48 @@ class SkyFlat(BaseScheduleAlgorithm):
             )
 
         return np.array(slots, dtype=SLOT_DTYPE)
+
+    def _sun_alt_crossing(self, dawn_jd: float, target_alt: float) -> float:
+        """JD at which the RISING sun reaches ``target_alt`` after ``dawn_jd``.
+
+        Bisection on the site's own ephemeris - no closed form, and asking
+        the site keeps this consistent with whatever horizon the site is
+        configured with. Returns ``dawn_jd`` unchanged if the sun is
+        already above the target (a night that ends past it) or if the
+        crossing is not found inside the search span.
+        """
+        start = datetime_from_jd(dawn_jd)
+        if self.site.sun_altitude(start) >= target_alt:
+            return dawn_jd
+
+        # the sun climbs from -18 to 0 in well under three hours anywhere
+        # this code runs; cap the search there rather than at sunrise, which
+        # would need another ephemeris call
+        lo, hi = start, start + dt.timedelta(hours=SUN_CROSSING_SEARCH_HOURS)
+        if self.site.sun_altitude(hi) < target_alt:
+            log.warning(
+                "Sun does not reach %.1f deg within %g h of dawn; leaving the "
+                "morning flats at the night's end.",
+                target_alt,
+                SUN_CROSSING_SEARCH_HOURS,
+            )
+            return dawn_jd
+
+        for _ in range(SUN_CROSSING_ITERATIONS):
+            mid = lo + (hi - lo) / 2
+            if self.site.sun_altitude(mid) < target_alt:
+                lo = mid
+            else:
+                hi = mid
+
+        log.info(
+            "Morning sky flats anchored at sun altitude %.1f deg (%s), not at "
+            "the night's end (%s).",
+            target_alt,
+            hi.strftime("%Y-%m-%d %H:%M:%S"),
+            start.strftime("%Y-%m-%d %H:%M:%S"),
+        )
+        return jd_from_datetime(hi)
 
     def next(self, now_mjd, programs, check=None):
         """Earliest pending flat program (they execute in slew_at order)."""
