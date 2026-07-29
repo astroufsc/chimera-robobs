@@ -1407,7 +1407,8 @@ def add_observation(session, algorithms, block_rows, obstime_jd: float) -> None:
         program = Program(
             target_id=obs_block.target_id,
             name=target.name,
-            pi="",
+            # carried all the way into the PROG_PI header of every frame
+            pi=project.pi,
             priority=project.priority,
             slew_at=slew_at,
             pid=obs_block.pid,
