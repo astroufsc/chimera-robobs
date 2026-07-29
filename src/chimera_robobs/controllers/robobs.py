@@ -175,6 +175,16 @@ class RobObs(ChimeraObject):
         # frame) skips one program and continues; a run of them means the
         # hardware or sky is unusable and the night should hold.
         "max_consecutive_errors": 3,
+        # Per-action overheads (seconds) for estimating the duration of a
+        # block that has NO length stored at ingest. None keeps the
+        # historical behaviour (a bare sum of exposure times, i.e. zero
+        # overhead), so setting nothing changes nothing. Give the camera's
+        # MEASURED values - the same ones the loaders pass to
+        # `chimera-robobs add-observing-block --readout-overhead` - so the
+        # stored and the fallback estimate agree about the same block.
+        "readout_overhead": None,
+        "autofocus_overhead": None,
+        "autoflat_frame_overhead": None,
     }
 
     def __init__(self):
@@ -223,6 +233,15 @@ class RobObs(ChimeraObject):
             log=self.log,
             seeing=self._get_seeing if self["seeingmonitors"] is not None else None,
             algorithms=self._algorithms,
+            overheads={
+                key: float(self[option])
+                for key, option in (
+                    ("readout", "readout_overhead"),
+                    ("autofocus", "autofocus_overhead"),
+                    ("autoflat_frame", "autoflat_frame_overhead"),
+                )
+                if self[option] is not None
+            },
         )
 
         # event subscription happens on the first control() tick: during

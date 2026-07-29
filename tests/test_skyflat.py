@@ -301,3 +301,77 @@ def test_execution_order_is_sensitivity_not_need(session_factory):
         f"morning runs blockid {morning[0]['blockid']} before "
         f"{morning[1]['blockid']}: least sensitive placed in the darkest sky"
     )
+
+
+class RisingSunSite(FakeSite):
+    """A site whose sun actually climbs, so the morning anchor can be
+    resolved: altitude = alt0 + rate * (t - dawn), degrees per hour."""
+
+    def __init__(self, dawn, alt0=-18.0, rate=13.0, **kwargs):
+        super().__init__(**kwargs)
+        self._dawn = dawn
+        self._alt0 = alt0
+        self._rate = rate
+
+    def sun_altitude(self, date=None) -> float:
+        when = self._parse(date)
+        hours = (when - self._dawn).total_seconds() / 3600.0
+        return float(self._alt0 + self._rate * hours)
+
+
+def test_the_morning_set_can_be_anchored_where_the_controller_can_expose(
+    session_factory,
+):
+    """Anchoring the morning flats at the night's end hands the telescope
+    over long before the controller can take a frame: on opd-40 the -18 deg
+    anchor was 46 min ahead of the first exposable frame at -8, and the
+    scheduler simply waited through usable sky (lna40 PENDING_ISSUES 50).
+    """
+    session = session_factory()
+    _add_flat_block(session, 1, "CLEAR")
+    _add_flat_block(session, 2, "R")
+
+    dawn_dt = UT + dt.timedelta(hours=10)
+    site = RisingSunSite(dawn=dawn_dt, ut_now=UT)
+    algorithm = build_algorithms(session_factory, site)[5]
+    jd_start, jd_end = jd_from_datetime(UT), jd_from_datetime(dawn_dt)
+
+    def morning_starts(config):
+        slots = algorithm.process(
+            obs_start=jd_start,
+            obs_end=jd_end,
+            query=_query(session),
+            config=dict({"pid": PID, "flat_window": "morning"}, **config),
+        )
+        return sorted(float(s[0]) for s in slots)
+
+    at_dawn = morning_starts({})
+    at_minus_8 = morning_starts({"flat_sun_alt": -8.0})
+
+    assert len(at_dawn) == len(at_minus_8) == 2
+    # -18 -> -8 at 13 deg/h is ~46 min, and the stagger is preserved
+    delay_min = (at_minus_8[0] - at_dawn[0]) * 24 * 60
+    assert delay_min == pytest.approx(10.0 / 13.0 * 60, abs=1.0)
+    assert (at_minus_8[1] - at_minus_8[0]) == pytest.approx(60.0 / 86400.0, rel=1e-3)
+
+
+def test_the_morning_anchor_is_left_alone_when_the_sun_never_gets_there(
+    session_factory,
+):
+    """A target the sun does not reach inside the search span must not
+    silently move the flats: fall back to the night's end."""
+    session = session_factory()
+    _add_flat_block(session, 1, "CLEAR")
+
+    dawn_dt = UT + dt.timedelta(hours=10)
+    site = RisingSunSite(dawn=dawn_dt, ut_now=UT, rate=0.1)  # barely climbs
+    algorithm = build_algorithms(session_factory, site)[5]
+
+    slots = algorithm.process(
+        obs_start=jd_from_datetime(UT),
+        obs_end=jd_from_datetime(dawn_dt),
+        query=_query(session),
+        config={"pid": PID, "flat_window": "morning", "flat_sun_alt": -8.0},
+    )
+
+    assert float(slots[0][0]) == pytest.approx(jd_from_datetime(dawn_dt), abs=1e-9)

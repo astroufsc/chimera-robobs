@@ -46,6 +46,14 @@ class RobObsEngine:
         (negative meaning "no measurement available").
     :param algorithms: id-keyed algorithm registry (built over
         ``session_factory``/``site`` when omitted).
+    :param overheads: per-action overheads (seconds) used to estimate the
+        duration of a block that has NO length stored at ingest, as
+        ``{"readout": .., "autofocus": .., "autoflat_frame": ..}``.  They
+        default to ZERO, which is the historical behaviour: a bare sum of
+        exposure times.  That understates every block it is applied to, so a
+        site that knows its camera should pass the measured values (the
+        RobObs controller exposes them as ``readout_overhead`` &c.) - but the
+        default must not change, or every deployment's packing shifts.
     """
 
     def __init__(
@@ -55,11 +63,18 @@ class RobObsEngine:
         log: logging.Logger | None = None,
         seeing: Callable[[], float] | None = None,
         algorithms: dict | None = None,
+        overheads: dict | None = None,
     ):
         self.session = session_factory
         self.site = site
         self.log = log or module_log
         self.seeing = seeing
+        self.overheads = {
+            "readout": 0.0,
+            "autofocus": 0.0,
+            "autoflat_frame": 0.0,
+            **(overheads or {}),
+        }
         self.algorithms = (
             algorithms
             if algorithms is not None
@@ -115,7 +130,12 @@ class RobObsEngine:
                 # and focus overheads — recovered 2018 fix from the
                 # never-merged bugfix/block_length branch); fall back to the
                 # bare exposure sum for blocks without a stored length
-                length = program[2].length or block_duration(program[2].actions)
+                length = program[2].length or block_duration(
+                    program[2].actions,
+                    readout=self.overheads["readout"],
+                    autofocus_sweep=self.overheads["autofocus"],
+                    autoflat_frame=self.overheads["autoflat_frame"],
+                )
 
                 if not sched.timed_constraint and program[0].slew_at > nowmjd:
                     self.log.debug("Checking if program can be observed earlier...")

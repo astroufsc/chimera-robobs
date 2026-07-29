@@ -618,6 +618,25 @@ class Expose(Action):
         return ca
 
 
+#: Default per-action overheads (seconds) used when estimating how long an
+#: observing block takes.  These are the values the legacy tool hard-coded;
+#: they are GUESSES, and the read-out one in particular is wrong for any
+#: modern camera (the QHY600 on the LNA 40 cm measures 2.23 s against the
+#: 12 s here).  They stay as the defaults so existing databases keep
+#: reproducing their numbers - override them with the measured ones per
+#: site: the CLI ingest takes --readout-overhead/--autofocus-overhead/
+#: --autoflat-overhead, and the RobObs controller takes the matching
+#: readout_overhead/autofocus_overhead/autoflat_frame_overhead options.
+DEFAULT_READOUT_OVERHEAD = 12.0
+DEFAULT_AUTOFOCUS_OVERHEAD = 600.0
+#: per-frame budget of an autoflat action: the sky-flat controller decides
+#: the exposure itself and waits for the right sky level between frames
+DEFAULT_AUTOFLAT_FRAME_OVERHEAD = 60.0
+#: read-out charged by the offline simulation for blocks with no stored
+#: length (process-queue --simulation-readout)
+DEFAULT_SIMULATION_READOUT = 20.0
+
+
 def block_duration(
     actions,
     readout: float = 0.0,

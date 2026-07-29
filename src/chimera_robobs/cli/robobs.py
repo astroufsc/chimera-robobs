@@ -125,6 +125,7 @@ PID_CONFIG_KEYS = {
     "flat_window",
     "n_filters",
     "lookback",
+    "flat_sun_alt",
 }
 
 #: legacy CSV column names -> Target columns.  The production pointing CSVs
