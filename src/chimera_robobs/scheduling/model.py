@@ -85,6 +85,8 @@ def open_database(path: str | None = None, echo: bool = False) -> sessionmaker:
             connection.exec_driver_sql(
                 "ALTER TABLE program ADD COLUMN chimera_id INTEGER"
             )
+        if "handed_at" not in columns:
+            connection.exec_driver_sql("ALTER TABLE program ADD COLUMN handed_at FLOAT")
     # expire_on_commit=False: program tuples are passed between sessions
     # (controller event handlers, scheduling algorithms) and must stay
     # readable after commits, as the legacy code assumed.
@@ -353,6 +355,13 @@ class Program(Base):
     # instead of losing the night (2026-07-22: two stops, 55 programs
     # gone, full replans to recover).
     chimera_id = Column(Integer, default=None)
+    # MJD at which the program was handed to the chimera scheduler, cleared
+    # when its completion is applied. `finished` alone cannot say whether a
+    # program RAN - handover sets it too - so a handed program whose chimera
+    # row vanished (a scheduler.db wipe, a queue rebuild) was
+    # indistinguishable from an observed one and was lost for good
+    # (2026-07-26: BRUCH's 3.4 h block and four focus runs, an empty night).
+    handed_at = Column(Float, default=None)
 
     def __str__(self):
         return (

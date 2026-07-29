@@ -42,12 +42,26 @@ from chimera_robobs.scheduling.model import Project, TimedDB
 log = logging.getLogger(__name__)
 
 
-def parse_time_entry(entry, obs_start, obs_end):
+#: slack allowed at the edges of the observing window before an occurrence
+#: is dropped as past/late (the night start is recomputed here, so entry 0
+#: can land microseconds either side of ``obs_start``)
+WINDOW_TOLERANCE_DAYS = 5.0 / (24.0 * 60.0)
+
+
+def parse_time_entry(entry, obs_start, obs_end, night_start=None):
     """Resolve one ``times`` entry to ``(execute_at_mjd, target_name)``.
 
     ``target_name`` is ``None`` for unbound entries.  Returns ``None`` when
-    an absolute time does not fall in tonight's ``[obs_start, obs_end]``
+    the resolved time does not fall in tonight's ``[obs_start, obs_end]``
     JD window.  Raises :class:`TimedError` on a malformed entry.
+
+    A numeric entry counts hours from ``night_start`` — the dusk that opened
+    the night — NOT from ``obs_start``.  The two differ whenever the plan is
+    built mid-night (``--tonight`` sets ``obs_start`` to now), and anchoring
+    on ``obs_start`` silently moved the whole cadence: replanning at 04:00
+    UT on 2026-07-28 turned FOCUS' ``[0, 3, 6, 10]`` into 04:00/07:00/10:00/
+    14:00, putting half the night's runs after dawn and leaving the project
+    with no focus at all.
     """
     target_name = None
     if isinstance(entry, dict):
@@ -62,20 +76,30 @@ def parse_time_entry(entry, obs_start, obs_end):
     if isinstance(entry, bool):
         raise TimedError(f"invalid times entry: {entry!r}")
     if isinstance(entry, (int, float)):
-        return (obs_start - MJD_JD_OFFSET + float(entry) / 24.0, target_name)
+        anchor = obs_start if night_start is None else night_start
+        jd = anchor + float(entry) / 24.0
+        when = f"{entry} h after dusk"
+    else:
+        # absolute UT: an ISO string, or a datetime (PyYAML parses unquoted
+        # timestamps); naive values are UTC
+        if isinstance(entry, str):
+            try:
+                entry = dt.datetime.fromisoformat(entry)
+            except ValueError as exc:
+                raise TimedError(f"invalid times entry: {exc}") from exc
+        if not isinstance(entry, dt.datetime):
+            raise TimedError(f"invalid times entry: {entry!r}")
+        jd = jd_from_datetime(entry)
+        when = f"{entry} UT"
 
-    # absolute UT: an ISO string, or a datetime (PyYAML parses unquoted
-    # timestamps); naive values are UTC
-    if isinstance(entry, str):
-        try:
-            entry = dt.datetime.fromisoformat(entry)
-        except ValueError as exc:
-            raise TimedError(f"invalid times entry: {exc}") from exc
-    if not isinstance(entry, dt.datetime):
-        raise TimedError(f"invalid times entry: {entry!r}")
-    jd = jd_from_datetime(entry)
-    if not obs_start <= jd <= obs_end:
-        log.info("Timed request @ %s UT is not tonight. Skipping.", entry)
+    # Nothing should generate work that provably cannot run: an occurrence
+    # outside the window is dropped here instead of sitting in `timeddb`
+    # unrunnable (and, past dawn, unexpirable) until the next replan.
+    if jd < obs_start - WINDOW_TOLERANCE_DAYS:
+        log.info("Timed request @ %s has already passed. Skipping.", when)
+        return None
+    if jd > obs_end + WINDOW_TOLERANCE_DAYS:
+        log.info("Timed request @ %s is after the end of the night. Skipping.", when)
         return None
     return (jd - MJD_JD_OFFSET, target_name)
 
@@ -86,22 +110,51 @@ class Timed(Higher):
     default_slot_len = 1800.0
     timed_constraint = True
 
+    def _night_start(self, obs_start, obs_end):
+        """JD of the dusk that opened the night ending at ``obs_end``.
+
+        Falls back to ``obs_start`` when the site cannot be asked or when
+        the window does not start at a dusk at all (an explicit
+        ``--date-start`` earlier than it, a simulated window).
+        """
+        try:
+            dusk = self.site.sunset_twilight_end(
+                datetime_from_jd(obs_end) - dt.timedelta(hours=24)
+            )
+            night_start = jd_from_datetime(dusk)
+        except Exception:
+            log.warning(
+                "Could not resolve the night's dusk; anchoring the times "
+                "cadence on the window start.",
+                exc_info=True,
+            )
+            return obs_start
+        if night_start > obs_start:
+            return obs_start
+        return night_start
+
     def process(self, *, obs_start, obs_end, query, config=None, slot_len=None):
         # Try to read times from the configuration. If none is provided,
         # raise an exception.
         if not config:
             raise TimedError("No configuration file provided.")
 
-        # Resolve the times entries; absolute times not falling in tonight's
-        # window drop out here (parse_time_entry returns None for them).
+        # Resolve the times entries; times not falling in tonight's window
+        # drop out here (parse_time_entry returns None for them).
+        night_start = self._night_start(obs_start, obs_end)
+        if night_start != obs_start:
+            log.info(
+                "Numeric times entries count from dusk @ JD %.5f (the "
+                "observing window starts later, @ JD %.5f).",
+                night_start,
+                obs_start,
+            )
         occurrences = []
         for entry in config["times"]:
-            parsed = parse_time_entry(entry, obs_start, obs_end)
+            parsed = parse_time_entry(entry, obs_start, obs_end, night_start)
             if parsed is None:
                 continue
             execute_at, target_name = parsed
-            if execute_at > obs_end - MJD_JD_OFFSET:
-                log.warning("Request for observation after the end of the night.")
             log.debug(
                 "Executing time %i @ %.5f%s",
                 len(occurrences),

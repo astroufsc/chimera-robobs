@@ -22,8 +22,10 @@ Meant to be launched by ``test_fast_night.py`` in a subprocess (isolated
 """
 
 import datetime as dt
+import faulthandler
 import os
 import random
+import sys
 import tempfile
 import threading
 import time
@@ -83,29 +85,53 @@ def step(msg: str) -> None:
     print(f"--- {msg}", flush=True)
 
 
+#: hard internal deadline. Every wait here is bounded except the proxy calls
+#: into a stack that failed to start, and a hang then reported only as the
+#: runner's bare subprocess timeout - "slow" instead of "broken". Must stay
+#: below the runner's own timeout so this fires first, with stacks.
+DEADLINE_SECONDS = 240.0
+
+
+def _arm_deadline(seconds: float = DEADLINE_SECONDS) -> None:
+    def give_up():
+        print(f"FAIL: deadline of {seconds:.0f} s reached; thread stacks:", flush=True)
+        faulthandler.dump_traceback(file=sys.stdout)
+        sys.stdout.flush()
+        os._exit(1)
+
+    timer = threading.Timer(seconds, give_up)
+    timer.daemon = True
+    timer.start()
+
+
 def main() -> None:
+    _arm_deadline()
     host, port = "127.0.0.1", random.randint(20000, 60000)
 
     def loc(path: str) -> str:
         return f"tcp://{host}:{port}{path}"
 
     bus = Bus(f"tcp://{host}:{port}")
-    manager = Manager(bus=bus)
+    # The site is INJECTED into the manager, as production does: since
+    # astroufsc/chimera#271 `ChimeraObject.get_site()` is the only way an
+    # object reaches the site, and it raises when the manager has none -
+    # which wedged the scheduler's program thread here on every run.
+    # Manager registers it at /Site/<name>, so the locations below still
+    # resolve.
+    site_object = Site()
+    for key, value in dict(
+        name="opd",
+        latitude="-22:32:04",
+        longitude="-45:34:57",
+        altitude=1864,
+    ).items():
+        site_object[key] = value
+    manager = Manager(bus=bus, site=site_object)
     threading.Thread(target=bus.run_forever, daemon=True).start()
     if not bus._bus_started.wait(10):
         fail("bus did not start")
 
     step("registering observatory")
-    manager.add_class(
-        Site,
-        "opd",
-        dict(
-            name="OPD",
-            latitude="-22:32:04",
-            longitude="-45:34:57",
-            altitude=1864,
-        ),
-    )
     manager.add_class(FakeTelescope, "fake", {})
     manager.add_class(FakeFilterWheel, "fake", {"filters": "CLEAR B V R I"})
     manager.add_class(FakeCamera, "fake", {})
@@ -117,7 +143,7 @@ def main() -> None:
         Scheduler,
         "sched",
         {
-            "site": loc("/Site/opd"),
+            # no "site": the scheduler takes the manager-injected one (#271)
             "telescope": loc("/FakeTelescope/fake"),
             "camera": loc("/FakeCamera/fake"),
             "filterwheel": loc("/FakeFilterWheel/fake"),

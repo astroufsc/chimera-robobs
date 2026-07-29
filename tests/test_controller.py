@@ -240,6 +240,7 @@ def test_program_complete_ok_marks_observed(rob, chimera_session):
     csession = chimera_session()
     cprogram = csession.query(chimera_model.Program).one()
 
+    rob._watch_program_begin(cprogram.id)
     rob._watch_program_complete(cprogram.id, "OK")
 
     assert not rob._handed
@@ -283,6 +284,7 @@ def test_consecutive_errors_eventually_stop_robobs(rob, chimera_session):
             .first()
             .id
         )
+        rob._watch_program_begin(cid)
         rob._watch_program_complete(cid, status, "x")
 
     run_once("ERROR")
@@ -367,6 +369,7 @@ def test_program_complete_leaves_tracking_to_the_scheduler(rob, chimera_session)
     rob._handle_scheduler_idle()
     cprogram = chimera_session().query(chimera_model.Program).one()
 
+    rob._watch_program_begin(cprogram.id)
     rob._watch_program_complete(cprogram.id, "OK")
     time.sleep(0.1)
     assert rob._fake_telescope.calls == []
@@ -563,6 +566,7 @@ def test_program_complete_attributes_by_chimera_id(rob, chimera_session):
     first = (
         csession.query(chimera_model.Program).order_by(chimera_model.Program.id).first()
     )
+    rob._watch_program_begin(first.id)
     rob._watch_program_complete(first.id, "OK")
 
     session = rob._session()
@@ -585,6 +589,7 @@ def test_queue_clean_clears_every_stale_link(rob, chimera_session):
     assert rob._handle_scheduler_idle() == 0.0
     csession = chimera_session()
     cprogram = csession.query(chimera_model.Program).one()
+    rob._watch_program_begin(cprogram.id)
     rob._watch_program_complete(cprogram.id, "OK")
     # the chimera scheduler's own bookkeeping on success
     cprogram.finished = True
@@ -601,6 +606,155 @@ def test_queue_clean_clears_every_stale_link(rob, chimera_session):
     ran = session.query(model.Program).one()
     assert ran.finished is True, "a program that ran was spuriously recovered"
     assert ran.chimera_id is None, "stale link survived the queue wipe"
+
+
+def test_queue_clean_keeps_the_program_the_scheduler_is_running(rob, chimera_session):
+    """Deleting the row of the program being executed kills the
+    scheduler-program thread (ObjectDeletedError as it logs the abort it
+    just handled - every operator lock during a program, opd-40
+    2026-07-28) and frees its rowid for the next handover, which is how a
+    completion ends up credited to a different target."""
+    _populate_timed_program(rob)
+    rob.rob_state = RobState.ON
+    assert rob._handle_scheduler_idle() == 0.0
+    cprogram = chimera_session().query(chimera_model.Program).one()
+    rob._watch_program_begin(cprogram.id)
+    rob._fake_scheduler.running_program = {"id": cprogram.id, "name": cprogram.name}
+
+    rob.stop()
+
+    csession = chimera_session()
+    assert csession.query(chimera_model.Program).count() == 1, (
+        "the running program's row was deleted under the executor"
+    )
+    # and the robobs side keeps the link, so the completion still lands
+    session = rob._session()
+    handed = session.query(model.Program).one()
+    assert handed.chimera_id == cprogram.id
+    assert rob._handed  # the in-memory record survives too
+
+    # once it is no longer running, the next clean removes it as usual
+    rob._fake_scheduler.running_program = None
+    rob.stop()
+    assert chimera_session().query(chimera_model.Program).count() == 0
+
+
+def test_an_aborted_program_is_recovered_instead_of_being_lost(rob, chimera_session):
+    """An abort is an operator decision, not a program failure: it must not
+    count towards max_consecutive_errors, and the program - which never
+    ran - must come back on offer instead of staying finished with a dead
+    chimera link (2026-07-26: BRUCH's 3.4 h block consumed without a
+    single frame)."""
+    _populate_timed_program(rob)
+    rob.rob_state = RobState.ON
+    assert rob._handle_scheduler_idle() == 0.0
+    cprogram = chimera_session().query(chimera_model.Program).one()
+    rob._watch_program_begin(cprogram.id)
+
+    rob._watch_program_complete(cprogram.id, "ABORTED", "Aborted by user.")
+
+    assert rob._consecutive_errors == 0
+    assert not rob._handed
+    # the handover is still open, so the next queue clean re-offers it
+    rob.stop()
+    session = rob._session()
+    recovered = session.query(model.Program).one()
+    assert recovered.finished is False
+    assert recovered.handed_at is None
+    assert (
+        session.query(model.TimedDB)
+        .filter(model.TimedDB.scheduled == True)  # noqa: E712
+        .count()
+        == 0
+    )
+
+
+def test_a_completion_for_a_program_that_never_started_is_not_credited(
+    rob, chimera_session
+):
+    """The rowid-reuse misattribution (2026-07-26): a hand-loaded bias run
+    was executing when robobs wiped the queue, sqlite handed its freed id
+    to the eta Car program handed over 1 s later, and the bias run's
+    completion marked eta Car observed - `observinglog`, `obsblock` and
+    all - without the telescope ever pointing at it."""
+    _populate_timed_program(rob)
+    rob.rob_state = RobState.ON
+    assert rob._handle_scheduler_idle() == 0.0
+    cprogram = chimera_session().query(chimera_model.Program).one()
+
+    # the completion of the program that HELD this id before, arriving for a
+    # program that never emitted program_begin
+    rob._watch_program_complete(cprogram.id, "OK")
+
+    session = rob._session()
+    assert session.query(model.ObsBlock).one().observed is False
+    assert session.query(model.TimedDB).one().finished is False, (
+        "the occurrence was consumed by another program's completion"
+    )
+    assert rob._handed, "the program is still queued and must stay handed"
+
+
+def test_a_program_dropped_before_it_ran_goes_back_on_offer(rob, chimera_session):
+    """Same guard, the other shape: the scheduler finished the program
+    without executing it ('Program not valid anymore'), so its row is gone
+    from the queue. Crediting it would record an observation that never
+    happened; the program must be re-offered instead."""
+    _populate_timed_program(rob)
+    rob.rob_state = RobState.ON
+    assert rob._handle_scheduler_idle() == 0.0
+    csession = chimera_session()
+    cprogram = csession.query(chimera_model.Program).one()
+    program_id = cprogram.id
+    csession.delete(cprogram)
+    csession.commit()
+
+    rob._watch_program_complete(program_id, "OK")
+
+    session = rob._session()
+    program = session.query(model.Program).one()
+    assert session.query(model.ObsBlock).one().observed is False
+    assert program.finished is False
+    assert program.handed_at is None
+    assert (
+        session.query(model.TimedDB)
+        .filter(model.TimedDB.scheduled == True)  # noqa: E712
+        .count()
+        == 0
+    ), "the occurrence must be released with the program"
+    assert not rob._handed
+
+
+def test_stop_recovers_a_handed_program_whose_chimera_row_vanished(
+    rob, chimera_session
+):
+    """`finished` doubles as the handed marker, so a handed-but-unrun
+    program whose chimera row was wiped (a `chimera-sched --new`, a queue
+    rebuild) used to be left finished=1, chimera_id=NULL and never offered
+    again: BRUCH and four focus runs died that way on 2026-07-26, with the
+    night logging 'No program found' for 50 minutes."""
+    _populate_timed_program(rob)
+    rob.rob_state = RobState.ON
+    assert rob._handle_scheduler_idle() == 0.0
+    # somebody rebuilt scheduler.db underneath us
+    csession = chimera_session()
+    for program in csession.query(chimera_model.Program).all():
+        csession.delete(program)
+    csession.commit()
+    rob._handed.clear()  # as a robobs restart would leave it
+
+    rob.stop()
+
+    session = rob._session()
+    recovered = session.query(model.Program).one()
+    assert recovered.finished is False, "handed-but-unrun program lost for good"
+    assert recovered.chimera_id is None
+    assert recovered.handed_at is None
+    assert (
+        session.query(model.TimedDB)
+        .filter(model.TimedDB.scheduled == True)  # noqa: E712
+        .count()
+        == 0
+    )
 
 
 def _populate_timesequence_program(controller, slew_at):
@@ -633,9 +787,7 @@ def _populate_timesequence_program(controller, slew_at):
     return program
 
 
-def test_unpinned_program_is_queued_without_a_start_at_when_due(
-    rob, chimera_session
-):
+def test_unpinned_program_is_queued_without_a_start_at_when_due(rob, chimera_session):
     """A monitoring visit runs as soon as the telescope is free: no start_at,
     so the scheduler cannot hold it for a slot time computed from an
     estimated block length (opd-40 2026-07-27: 8.6 min idle per 25 min slot)."""
@@ -649,9 +801,7 @@ def test_unpinned_program_is_queued_without_a_start_at_when_due(
     assert not cprogram.start_at  # chimera's "no constraint" sentinel
 
 
-def test_a_monitoring_visit_with_a_future_slot_is_pulled_forward(
-    rob, chimera_session
-):
+def test_a_monitoring_visit_with_a_future_slot_is_pulled_forward(rob, chimera_session):
     """The point of the pair (timed_constraint=False + pin_start_time=False):
     the engine re-times the visit to the earliest instant that passes the
     conditions, so it is queued NOW rather than at its nominal slot. Under
@@ -694,9 +844,7 @@ def test_an_unpinned_program_the_engine_could_not_re_time_is_not_queued_early(
     assert not rob._handed
 
 
-def test_pinned_program_is_still_queued_early_with_its_start_at(
-    rob, chimera_session
-):
+def test_pinned_program_is_still_queued_early_with_its_start_at(rob, chimera_session):
     """The unpinned path must not change the ordinary one: a timed program
     is handed over ahead of time and held by the scheduler's start_at."""
     slew_at = rob._site.mjd() + 900.0 / 86400.0
