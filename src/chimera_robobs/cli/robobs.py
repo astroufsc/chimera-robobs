@@ -422,7 +422,16 @@ def add_targets_from_table(session, targets_table) -> list:
     """Add targets from an astropy table (CSV) to the database.
 
     Returns the list of added :class:`Target` rows (populated ids after the
-    commit), in file order.  Does not check for duplicates.
+    commit), in file order.
+
+    The table is APPEND-ONLY: rows are never updated and never matched
+    against what is already there.  Names are not unique - two projects may
+    each have a ``std`` or a ``test`` - so there is nothing to match on, and
+    a reload must leave the old rows alone anyway: the observing log stores
+    target ids, and rewriting or deleting them orphans every observation
+    already recorded against them.  A reload appends a fresh set and the
+    project's new blocks point at those; the previous rows stay behind as
+    the history the log refers to.
     """
     columns = {name.lower().strip(): name for name in targets_table.dtype.names}
 
@@ -958,16 +967,31 @@ def _pair_observing_log(session, entries, start_marker, end_marker) -> list[dict
     programs = []
     current = None
     flat_program_iters: dict[int, object] = {}
+    ambiguous_names: set[str] = set()
     for entry in entries:
         if start_marker in entry.action:
             target = session.query(Target).filter(Target.id == entry.target_id).first()
             if target is None:
-                # A reload (delete-project + clean-targets + add-project-inputs)
-                # re-creates every target with a NEW id, orphaning the ids
-                # already written to the observing log. Resolve on the name the
-                # log also stores, or a mid-night reload silently erases every
-                # program observed before it from the plot.
-                target = session.query(Target).filter(Target.name == entry.name).first()
+                # TEMPORARY, for databases that predate the append-only target
+                # table. `clean-targets` used to run on every reload, deleting
+                # rows the observing log still pointed at, so the whole night
+                # before a reload vanished from the plot (opd-40 2026-07-28).
+                # Names are NOT unique across projects, so resolve by name only
+                # when exactly one target carries it: drawing an entry at
+                # another target's altitude is worse than leaving a pre-reload
+                # night off the plot. Nothing recorded after the append-only
+                # change needs this - delete it once no live database carries
+                # orphaned ids.
+                matches = (
+                    session.query(Target)
+                    .filter(Target.name == entry.name)
+                    .limit(2)
+                    .all()
+                )
+                if len(matches) == 1:
+                    target = matches[0]
+                elif matches:
+                    ambiguous_names.add(entry.name)
             if target is None:
                 continue
             if current is not None:  # previous program never ended: aborted
@@ -1040,6 +1064,11 @@ def _pair_observing_log(session, entries, start_marker, end_marker) -> list[dict
         current["end"] = current["start"] + dt.timedelta(minutes=1)
         current["aborted"] = True
         programs.append(current)
+    if ambiguous_names:
+        _err(
+            "*Left off the plot: orphaned log entries whose name matches more "
+            f"than one target ({', '.join(sorted(ambiguous_names))})."
+        )
     return programs
 
 
@@ -1075,8 +1104,19 @@ def cmd_plot_log(args) -> int:
         dusk_aware = site.sunset_twilight_end(times.obs_end - dt.timedelta(hours=24))
         dawn = site.sunrise_twilight_begin(dusk_aware).replace(tzinfo=None)
         dusk = dusk_aware.replace(tzinfo=None)
-        x_lo = min(obs_start, dusk)
-        x_hi = max(obs_end, dawn)
+
+        # Frame the axis on the SUN, not on the query window: --date-start/
+        # --date-end are deliberately generous (plot_night_progress.sh asks
+        # for 20:00-13:00 UT so one window covers both sides of UT midnight)
+        # and letting them drive the axis left hours of empty daylight on the
+        # right of every plot. site.sunset() returns the NEXT sunset after the
+        # date it is given, so anchor on UT noon of the dusk date.
+        noon = dusk.replace(hour=12, minute=0, second=0, microsecond=0)
+        sunset = site.sunset(noon).replace(tzinfo=None)
+        sunrise = site.sunrise(sunset).replace(tzinfo=None)
+        margin = dt.timedelta(minutes=30)
+        x_lo = sunset - margin
+        x_hi = sunrise + margin
 
         if args.simulation:
             start_marker = "Simulation: Acquisition Start"
@@ -1099,6 +1139,11 @@ def cmd_plot_log(args) -> int:
             _err("*No matching observing-log entries in the selected window.")
             return 1
 
+        # the sun window is the frame, not a filter: widen it rather than clip
+        # anything that really ran outside it (a daytime test, a long abort)
+        x_lo = min([x_lo] + [p["start"] for p in programs])
+        x_hi = max([x_hi] + [p["end"] for p in programs])
+
         def altitude(ra, dec, when):
             return site.ra_dec_to_alt_az(ra, dec, site.lst_in_rads(when))[0]
 
@@ -1109,7 +1154,7 @@ def cmd_plot_log(args) -> int:
         # plot was made (off-scale and invisible when plotting a past night)
         for boundary in (dusk, dawn):
             ax.plot([boundary, boundary], [alt_min, alt_max], "r--")
-        ax.plot([x_lo - pad, x_hi + pad], [alt_min + 10] * 2, "r--")
+        ax.plot([x_lo, x_hi], [alt_min + 10] * 2, "r--")
         now = site.ut().replace(tzinfo=None)
         ax.plot([now, now], [alt_min, alt_max], "b--", label=f"plotted {now:%H:%M}")
 
@@ -1176,7 +1221,7 @@ def cmd_plot_log(args) -> int:
 
         kind = "Simulation" if args.simulation else "Observed"
         ax.set_title(f"robobs {kind} — night of {dusk.date()}")
-        ax.set_xlim(x_lo - pad, x_hi + pad)
+        ax.set_xlim(x_lo, x_hi)
         ax.set_ylim(alt_min, alt_max)
         ax.set_ylabel("Altitude (deg)")
         ax.xaxis.set_major_formatter(DateFormatter("%H:%M"))
