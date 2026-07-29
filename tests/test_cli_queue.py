@@ -242,6 +242,144 @@ def test_pair_observing_log_marks_aborted(tmp_path):
     assert programs[2]["end"] == entries[3].time + dt.timedelta(minutes=1)
 
 
+def test_add_targets_appends_and_never_touches_the_old_rows(db, tmp_path):
+    """The target table is append-only: a reload adds a fresh set and leaves
+    the ids the observing log already refers to exactly as they were."""
+    targets = tmp_path / "t.csv"
+    targets.write_text(TARGETS_CSV)
+
+    assert _run(db, "add-targets", "-f", str(targets)) == 0
+    session = _session(db)
+    before = {
+        t.id: (t.name, t.target_ra, t.target_dec) for t in session.query(model.Target)
+    }
+    assert len(before) == 2
+
+    # the same project reloaded, with one coordinate edited
+    targets.write_text(TARGETS_CSV.replace("11:00:00,+00:00:00", "11:30:00,+05:00:00"))
+    assert _run(db, "add-targets", "-f", str(targets)) == 0
+
+    session = _session(db)
+    rows = {
+        t.id: (t.name, t.target_ra, t.target_dec) for t in session.query(model.Target)
+    }
+    assert len(rows) == 4, "a reload appends rather than replacing"
+    for old_id, old_values in before.items():
+        assert rows[old_id] == old_values, "an existing target must not be rewritten"
+    fresh = sorted(set(rows) - set(before))
+    assert rows[fresh[1]][1] == pytest.approx(11.5)
+    assert rows[fresh[1]][2] == pytest.approx(5.0)
+
+
+def test_add_targets_keeps_same_named_targets_apart(db, tmp_path):
+    """Names are not unique - two projects may each have a 'std' - so a name
+    collision must never merge two targets."""
+    first = tmp_path / "a.csv"
+    first.write_text("RA,DEC,NAME\n10:00:00,+00:00:00,std\n")
+    second = tmp_path / "b.csv"
+    second.write_text("RA,DEC,NAME\n22:00:00,-30:00:00,std\n")
+
+    assert _run(db, "add-targets", "-f", str(first)) == 0
+    assert _run(db, "add-targets", "-f", str(second)) == 0
+
+    session = _session(db)
+    std = session.query(model.Target).filter(model.Target.name == "std").all()
+    assert len(std) == 2
+    assert sorted(round(t.target_ra, 3) for t in std) == [10.0, 22.0]
+
+
+def test_pair_observing_log_recovers_a_legacy_orphaned_target(tmp_path):
+    """Legacy databases carry log rows whose target was deleted by the old
+    clean-targets reload; resolve them by name rather than dropping the
+    whole pre-reload night. Delete this with the fallback itself."""
+    import datetime as dt
+
+    from chimera_robobs.cli.robobs import _pair_observing_log
+
+    factory = model.open_database(str(tmp_path / "robobs.db"))
+    session = factory()
+    old = model.Target(name="tgt", target_ra=10.0, target_dec=0.0)
+    session.add(old)
+    session.commit()
+    stale_id = old.id
+
+    # what robobs_load_inputs.sh does: delete every target, add them back.
+    # The id is explicit because sqlite would otherwise hand the fresh row
+    # the rowid it just freed, which is exactly the case that never broke.
+    session.delete(old)
+    session.commit()
+    session.add(
+        model.Target(id=stale_id + 100, name="tgt", target_ra=10.0, target_dec=0.0)
+    )
+    session.commit()
+    assert (
+        session.query(model.Target).filter(model.Target.id == stale_id).first() is None
+    )
+
+    t0 = dt.datetime(2026, 7, 6, 1, 0, 0)
+    entries = [
+        model.ObservingLog(
+            time=t0 + dt.timedelta(minutes=m),
+            target_id=stale_id,
+            name="tgt",
+            action=action,
+        )
+        for m, action in (
+            (0, "ROBOBS: Program Started"),
+            (10, "ROBOBS: Program End with status OK(None)"),
+        )
+    ]
+    programs = _pair_observing_log(session, entries, "Program Started", "Program End")
+    assert len(programs) == 1
+    assert programs[0]["name"] == "tgt"
+    assert programs[0]["ra"] == 10.0
+
+
+def test_pair_observing_log_drops_an_orphan_whose_name_is_ambiguous(tmp_path):
+    """Target names are not unique across projects, so the by-name recovery of
+    an orphaned entry must refuse to guess: drawing the entry at another
+    target's altitude is worse than leaving it off the plot. Delete this with
+    the fallback itself."""
+    import datetime as dt
+
+    from chimera_robobs.cli.robobs import _pair_observing_log
+
+    factory = model.open_database(str(tmp_path / "robobs.db"))
+    session = factory()
+    old = model.Target(name="std", target_ra=10.0, target_dec=0.0)
+    session.add(old)
+    session.commit()
+    stale_id = old.id
+    session.delete(old)
+    session.commit()
+
+    # two projects, each with a target called "std" — the shape the fallback
+    # cannot tell apart, at opposite sides of the sky
+    session.add(
+        model.Target(id=stale_id + 100, name="std", target_ra=10.0, target_dec=0.0)
+    )
+    session.add(
+        model.Target(id=stale_id + 101, name="std", target_ra=200.0, target_dec=-40.0)
+    )
+    session.commit()
+
+    t0 = dt.datetime(2026, 7, 6, 1, 0, 0)
+    entries = [
+        model.ObservingLog(
+            time=t0 + dt.timedelta(minutes=m),
+            target_id=stale_id,
+            name="std",
+            action=action,
+        )
+        for m, action in (
+            (0, "ROBOBS: Program Started"),
+            (10, "ROBOBS: Program End with status OK(None)"),
+        )
+    ]
+    programs = _pair_observing_log(session, entries, "Program Started", "Program End")
+    assert programs == []
+
+
 def test_pid_config_overrides_stored_scheduling(populated, fake_connect, tmp_path):
     """--pid-config is a per-night override on top of the project's stored
     scheduling section."""
