@@ -1129,23 +1129,27 @@ def test_skyflat_offered_during_twilight(session_factory):
         assert algorithms[5].in_twilight_window(site.mjd()), f"sun {sun_alt}"
 
 
-def test_site_adapter_normalises_sun_altitude():
-    """Site.sunpos() returns a tuple on some cores and a Position on others."""
+def test_site_adapter_never_reads_sunpos():
+    """The sun altitude comes from Site.sun_altitude() (chimera#275), never
+    from sunpos().
+
+    sunpos() answers with a Position, which msgspec cannot encode: reading
+    it through a proxy logs "won't work on remote buses" on every call and
+    only works at all because robobs shares a bus with the site. The engine
+    asks on every twilight-window check, so it flooded the log (opd-40
+    2026-07-30). A site whose sunpos() explodes proves it is never called.
+    """
     from chimera_robobs.scheduling.siteadapter import SiteAdapter
 
-    class TupleSite:
-        def sunpos(self, date=None):
-            return -8.25, 130.0
-
-    class PositionSite:
-        class _Pos:
-            alt = -8.25
+    class FloatSite:
+        def sun_altitude(self, date=None):
+            return -8.25
 
         def sunpos(self, date=None):
-            return self._Pos()
+            raise AssertionError("sunpos() must never cross the bus")
 
-    assert SiteAdapter(TupleSite()).sun_altitude() == pytest.approx(-8.25)
-    assert SiteAdapter(PositionSite()).sun_altitude() == pytest.approx(-8.25)
+    assert SiteAdapter(FloatSite()).sun_altitude() == pytest.approx(-8.25)
+    assert SiteAdapter(FloatSite()).sun_altitude(UT) == pytest.approx(-8.25)
 
 
 def test_unobservable_top_priority_does_not_hide_alternates(session_factory):
