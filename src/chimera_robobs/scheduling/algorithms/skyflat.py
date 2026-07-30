@@ -297,18 +297,26 @@ class SkyFlat(BaseScheduleAlgorithm):
                 # captured by next() at selection time (resolving
                 # block.actions HERE trusts an obsblock id that a
                 # clean/reload may have reassigned to another filter).
-                taken = getattr(program[0], "_skyflat_frames_taken", None)
-                if taken:
-                    captured = list(taken.items())
-                else:
-                    captured = getattr(program[0], "_skyflat_ledger", None)
-                if captured is None:
-                    captured = [
-                        (act.filter, act.frames or 0)
-                        for act in block.actions
-                        if isinstance(act, AutoFlat)
-                    ]
-                for filter_name, frames in captured:
+                # ONLY the frames the controller reports actually taking.
+                #
+                # The configured counts used to stand in when no report
+                # arrived - but no report is exactly what a set that took
+                # NOTHING produces (there are no expose_complete events),
+                # so the fallback fired precisely when it was most wrong.
+                # On opd-40 2026-07-30 four real CLEAR frames were followed
+                # by five 9-frame entries for filters that never exposed:
+                # 4 frames on disk, 49 in the ledger. The fewest-flats
+                # selection then reads those filters as freshly covered and
+                # skips them, so one empty twilight quietly costs the next
+                # several nights of rotation too.
+                #
+                # An empty ledger is right here: nothing was observed, so
+                # nothing is recorded, and the filters stay top of the
+                # need-order for tomorrow.
+                taken = getattr(program[0], "_skyflat_frames_taken", None) or {}
+                for filter_name, frames in taken.items():
+                    if not frames:
+                        continue
                     session.add(
                         SkyFlatDB(
                             pid=prog.pid,

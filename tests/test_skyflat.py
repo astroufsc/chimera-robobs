@@ -143,6 +143,9 @@ def test_skyflat_observed_writes_ledger_only_when_not_soft(session_factory, site
 
     algorithms = build_algorithms(session_factory, site)
     row = (program, blockpar, block, target)
+    # what the controller reports actually taking - the only source the
+    # ledger trusts
+    program._skyflat_frames_taken = {"V": 7}
 
     algorithms[5].observed(61000.0, row, soft=True)
     assert session_factory().query(model.SkyFlatDB).count() == 0  # simulation
@@ -151,6 +154,47 @@ def test_skyflat_observed_writes_ledger_only_when_not_soft(session_factory, site
     ledger = session_factory().query(model.SkyFlatDB).one()
     assert (ledger.filter, ledger.frames) == ("V", 7)
     assert ledger.observed_at is not None
+
+
+def test_a_set_that_took_nothing_writes_no_ledger_entry(session_factory, site):
+    """An empty twilight must not look like coverage.
+
+    The configured frame counts used to stand in when the controller sent
+    no report - but no report is exactly what a set that exposed NOTHING
+    produces. On opd-40 2026-07-30 four real CLEAR frames were followed by
+    five 9-frame entries for filters that never opened the shutter: 4
+    frames on disk, 49 in the ledger. The fewest-flats selection then reads
+    those filters as freshly covered and skips them, so one empty twilight
+    costs the next several nights of rotation as well.
+    """
+    session = session_factory()
+    block = _add_flat_block(session, 1, "V", frames=9)
+    target = session.query(model.Target).one()
+    blockpar = session.query(model.BlockPar).one()
+    program = model.Program(
+        target_id=target.id,
+        name=target.name,
+        priority=0,
+        slew_at=61000.0,
+        pid=PID,
+        obsblock_id=block.id,
+        blockpar_id=blockpar.id,
+    )
+    session.add(program)
+    session.commit()
+
+    algorithms = build_algorithms(session_factory, site)
+    row = (program, blockpar, block, target)
+
+    # the controller never reported a frame: the set took nothing
+    algorithms[5].observed(61000.0, row, soft=False)
+    assert session_factory().query(model.SkyFlatDB).count() == 0
+
+    # and a filter that reports zero frames is not coverage either
+    program._skyflat_frames_taken = {"V": 0, "R": 3}
+    algorithms[5].observed(61000.0, row, soft=False)
+    ledger = session_factory().query(model.SkyFlatDB).all()
+    assert [(e.filter, e.frames) for e in ledger] == [("R", 3)]
 
 
 def test_engine_waives_conditions_for_twilight_calibration(session_factory):
@@ -229,6 +273,8 @@ def test_ledger_survives_block_id_reassignment(session_factory):
 
     chosen = algorithm.next(61000.0, [row])
     assert chosen is not None
+    # the controller reports the filter it actually used
+    chosen[0]._skyflat_frames_taken = {"CLEAR": 9}
 
     # a clean/reload between selection and completion: the same obsblock id
     # now carries a different filter

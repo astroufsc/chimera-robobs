@@ -855,3 +855,36 @@ def test_pinned_program_is_still_queued_early_with_its_start_at(rob, chimera_ses
 
     cprogram = chimera_session().query(chimera_model.Program).one()
     assert cprogram.start_at == pytest.approx(slew_at)
+
+
+def test_a_program_from_a_finished_night_is_expired_not_observed(rob, chimera_session):
+    """A queue left from an earlier night must not open tonight.
+
+    Left in the queue - a project make_queue skipped, or a planning run that
+    failed part way - a stale program stays eligible forever: unpinned it
+    reaches the chimera scheduler with start_at 0.0, which reads as "ready
+    now", so it wins any instant when nothing else is due yet. On opd-40
+    2026-07-30 seventeen RUP147 programs left from 07-29 opened the night at
+    21:58:40 ahead of ETACAR and BRUCH, whose start_at was twenty seconds
+    away - and RUP147 is the LOWEST priority in the ladder.
+    """
+    yesterday = rob._site.mjd() - 1.0  # same slot, one night ago
+    _populate_program(rob, slew_at=yesterday)
+    rob.rob_state = RobState.ON
+
+    rob._handle_scheduler_idle()
+    assert not rob._handed, "a program from a finished night was handed over"
+
+    session = rob._session()
+    assert all(p.finished for p in session.query(model.Program)), (
+        "the stale program should be expired, not left to win the next slot"
+    )
+
+
+def test_an_unscheduled_program_is_never_stale(rob, chimera_session):
+    """slew_at 0 is the 'no constraint' sentinel, not a date in 1858."""
+    _populate_program(rob, slew_at=0.0)
+    rob.rob_state = RobState.ON
+
+    rob._handle_scheduler_idle()
+    assert rob._handed, "an unpinned program was mistaken for a stale one"
