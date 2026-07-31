@@ -68,9 +68,9 @@ class FakeSite:
     def lst_in_rads(self, date=None) -> float:
         return self._lst
 
-    def sunpos(self, date=None):
-        """(alt, az) in degrees, like the chimera Site this fakes."""
-        return self._sun_alt, 0.0
+    # No sunpos() on purpose: it answers with a Position, which the bus
+    # cannot encode, so nothing here may call it. Its absence turns any
+    # such call into an AttributeError in the tests.
 
     def sun_altitude(self, date=None) -> float:
         """Degrees, mirroring SiteAdapter.sun_altitude."""
@@ -104,6 +104,15 @@ class FakeSite:
 
     def moon_ra_dec(self, date=None) -> tuple[float, float]:
         return self._moon
+
+    # This fake stands in for TWO interfaces: a chimera Site proxy behind
+    # SiteAdapter (test_cli_queue), and the adapter itself when algorithms
+    # are driven directly (test_scheduling_process). chimera's Site spells
+    # it `moonphase`, the adapter exposes `moon_phase`, so both are needed -
+    # and both must be here rather than aliased away, so that a rename on
+    # either side fails the suite instead of failing on the telescope.
+    def moonphase(self, date=None) -> float:
+        return self._moon_phase
 
     def moon_phase(self, date=None) -> float:
         return self._moon_phase

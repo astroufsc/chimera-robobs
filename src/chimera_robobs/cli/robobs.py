@@ -93,6 +93,13 @@ ACTION_TYPES = {
     "expose": Expose,
 }
 
+#: How far outside the observing window the process-queue simulation may
+#: reach, in DAYS. Twilight calibrations are anchored at sunset, ~1.5 h
+#: before the -18 deg dusk at OPD, so a few hours is enough; the bound
+#: exists to stop a queue left over from an EARLIER NIGHT from dragging the
+#: simulated clock back into it (opd-40 2026-07-30).
+SIM_NIGHT_MARGIN = 6.0 / 24.0
+
 #: hint appended to errors caused by unconverted legacy-dialect files
 MIGRATE_HINT = "legacy files must be converted with scripts/migrate_legacy_config.py"
 
@@ -1661,20 +1668,38 @@ def _process_queue(args, factory) -> int:
         if purged:
             log.debug("dropped %i stale simulation log entries", purged)
 
-        # twilight calibration programs (sky flats) live outside the
-        # -18 deg night: widen the simulation clock to cover them
+        # Twilight calibration programs (sky flats) live outside the -18 deg
+        # night, so the simulation clock is widened to cover them - but only
+        # by SIM_NIGHT_MARGIN, never to an arbitrary queue entry.
+        #
+        # Unbounded, `min(slew_at)` reaches into PREVIOUS nights: any queue
+        # left unfinished from an earlier night drags the simulation back to
+        # it, and the whole phantom night is walked before tonight is ever
+        # reached. On opd-40 2026-07-30 a stale RUP147 program from 07-29
+        # 22:15 started the simulation ~24 h early; EXOPL was consumed
+        # against that dead night and vanished from the plan, while the real
+        # scheduler offered it happily all night. The plan the operator sees
+        # then disagrees with what the telescope actually does, which is
+        # worse than a plan that is merely incomplete.
         slew_range = (
             session.query(
                 sqla_func.min(Program.slew_at), sqla_func.max(Program.slew_at)
             )
             .filter(Program.finished == False)  # noqa: E712
+            .filter(Program.slew_at >= obs_start - SIM_NIGHT_MARGIN)
+            .filter(Program.slew_at <= obs_end + SIM_NIGHT_MARGIN)
             .one()
         )
         otime = obs_start
         sim_end = obs_end
         if slew_range[0] is not None:
-            otime = min(obs_start, float(slew_range[0]))
-            sim_end = max(obs_end, float(slew_range[1]) + 1800.0 / SECONDS_PER_DAY)
+            otime = max(
+                min(obs_start, float(slew_range[0])), obs_start - SIM_NIGHT_MARGIN
+            )
+            sim_end = min(
+                max(obs_end, float(slew_range[1]) + 1800.0 / SECONDS_PER_DAY),
+                obs_end + SIM_NIGHT_MARGIN,
+            )
         app_open = 0.0
         idle = 0.0
 
