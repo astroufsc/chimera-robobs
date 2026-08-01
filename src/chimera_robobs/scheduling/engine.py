@@ -285,6 +285,13 @@ class RobObsEngine:
                 or nowmjd + (awaittime + aplen) / SECONDS_PER_DAY <= deadline
             )
 
+            # The branch below DELAYS the reference: the alternate starts
+            # sooner but ends later. Only worth it when the dead time it
+            # saves exceeds the delay it imposes.
+            saves_more_than_it_costs = (waittime - awaittime) > (
+                (awaittime + aplen) - waittime
+            )
+
             if awaittime + aplen < waittime and ends_before_deadline:
                 self.log.info(
                     "Program with priority %i fits in this slot. Selecting it instead.",
@@ -294,6 +301,7 @@ class RobObsEngine:
                 deadline = tighten(deadline, program)
             elif (
                 awaittime < waittime
+                and saves_more_than_it_costs
                 and ends_before_deadline
                 and hard_timed_at(program) is None
                 and self.check_conditions(
