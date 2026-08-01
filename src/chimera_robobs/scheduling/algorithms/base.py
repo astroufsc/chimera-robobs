@@ -191,9 +191,7 @@ class BaseScheduleAlgorithm:
         if not blocks:
             return None
         lengths = [
-            float(block.length)
-            for block in blocks
-            if getattr(block, "length", None)
+            float(block.length) for block in blocks if getattr(block, "length", None)
         ]
         if not lengths:
             return None

@@ -105,6 +105,15 @@ class FakeSite:
     def moon_ra_dec(self, date=None) -> tuple[float, float]:
         return self._moon
 
+    # This fake stands in for TWO interfaces: a chimera Site proxy behind
+    # SiteAdapter (test_cli_queue), and the adapter itself when algorithms
+    # are driven directly (test_scheduling_process). chimera's Site spells
+    # it `moonphase`, the adapter exposes `moon_phase`, so both are needed -
+    # and both must be here rather than aliased away, so that a rename on
+    # either side fails the suite instead of failing on the telescope.
+    def moonphase(self, date=None) -> float:
+        return self._moon_phase
+
     def moon_phase(self, date=None) -> float:
         return self._moon_phase
 

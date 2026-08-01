@@ -8,17 +8,18 @@ exchange scalars, strings and ISO datetimes with us:
 
 * datetimes returned by the proxy arrive as ISO strings — parsed back here;
 * datetime arguments are sent as pyephem-style strings ("YYYY/MM/DD HH:MM:SS")
-  which ``Site`` accepts for its ``date`` parameters;
-* ``Site.moonpos()`` returns a ``Position`` (not JSON-serializable), so the
-  moon position and phase are computed locally with pyephem.  The local moon
-  ra/dec is geocentric (up to ~1 degree of parallax from the topocentric
-  value), which is accurate enough for the moon-distance constraints used
-  here.
+  which ``Site`` accepts for its ``date`` parameters.
+
+Everything else is delegated.  Values that ``Site`` cannot put on the bus
+belong in ``Site`` as plain-float accessors, not in a workaround here: the
+sun altitude (astroufsc/chimera#275) and the moon position
+(``Site.moon_ra_dec()``) were both fixed that way, after local substitutes
+here had gone wrong in their own ways.  Parsing datetimes back from ISO
+strings is the one job left, and it is really the proxy's
+(astroufsc/chimera#288).
 """
 
 import datetime as dt
-
-import ephem
 
 from chimera_robobs.scheduling.dates import ensure_datetime, to_ephem_date
 
@@ -105,20 +106,26 @@ class SiteAdapter:
         )
         return float(alt), float(az)
 
-    # -- moon (computed locally, see module docstring) -------------------
-    def _moon(self, date: dt.datetime | None = None) -> ephem.Moon:
-        date = date or self.ut()
-        moon = ephem.Moon()
-        moon.compute(to_ephem_date(date))
-        return moon
-
+    # -- moon ------------------------------------------------------------
     def moon_ra_dec(self, date: dt.datetime | None = None) -> tuple[float, float]:
-        """Geocentric moon (ra [hours], dec [degrees])."""
-        moon = self._moon(date)
-        import math
+        """Moon apparent TOPOCENTRIC (ra [hours], dec [degrees]).
 
-        return math.degrees(float(moon.ra)) / 15.0, math.degrees(float(moon.dec))
+        Uses ``Site.moon_ra_dec()``. This used to
+        recompute the moon here with a bare pyephem ``Moon``, because
+        ``Site.moonpos()`` returns a non-encodable ``Position`` - but a bare
+        Moon is GEOCENTRIC, up to ~1 degree from the observer's view (the
+        moon's horizontal parallax). Harmless against a 10-30 degree
+        moon-distance limit, wrong for anything tighter, and there is no
+        reason to carry an ephemeris of our own to get a worse answer.
+        """
+        if date is None:
+            ra, dec = self._site.moon_ra_dec()
+        else:
+            ra, dec = self._site.moon_ra_dec(self._date_arg(date))
+        return float(ra), float(dec)
 
     def moon_phase(self, date: dt.datetime | None = None) -> float:
         """Moon illuminated fraction (0-1)."""
-        return float(self._moon(date).phase) / 100.0
+        if date is None:
+            return float(self._site.moonphase())
+        return float(self._site.moonphase(self._date_arg(date)))

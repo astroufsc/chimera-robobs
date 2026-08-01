@@ -44,6 +44,13 @@ EMPTY_QUEUE_RETRY = 300.0
 #: shorter than a slew, so waiting it out costs nothing
 UNPINNED_DUE_TOLERANCE = 30.0
 
+#: How far past its slot a program may be handed over, in SECONDS. Beyond
+#: this it belongs to a night that has ended - a queue make_queue skipped, or
+#: a planning run that failed part way - and observing it now would be
+#: observing yesterday's plan. 12 h clears any legitimate wait inside one
+#: night while catching anything left from the night before.
+STALE_PROGRAM_AGE = 12 * 3600.0
+
 SECONDS_PER_DAY = 86400.0
 
 
@@ -853,6 +860,35 @@ class RobObs(ChimeraObject):
                     csession.commit()
                     session.commit()
                     return min(due_in, EMPTY_QUEUE_RETRY)
+
+            # A program whose slot belongs to a night that is already over
+            # must not be handed over at all. Left in the queue - a project
+            # that make_queue skipped, or a run that failed part way - it
+            # stays eligible forever: unpinned it reaches the chimera
+            # scheduler with start_at 0.0, which reads as "ready now", so it
+            # wins any instant when nothing else is due yet. On opd-40
+            # 2026-07-30 seventeen RUP147 programs left from 07-29 opened
+            # the night at 21:58:40 ahead of ETACAR and BRUCH, whose
+            # start_at was twenty seconds away, and RUP147 is the LOWEST
+            # priority in the ladder.
+            # slew_at 0/None is the "no constraint" sentinel, not a date in
+            # 1858: an unscheduled program is never stale.
+            overdue_by = (
+                (self._site.mjd() - program.slew_at) * SECONDS_PER_DAY
+                if program.slew_at
+                else 0.0
+            )
+            if overdue_by > STALE_PROGRAM_AGE:
+                self.log.warning(
+                    "%s is %.1f h past its slot and belongs to a finished "
+                    "night; expiring it instead of observing it.",
+                    program,
+                    overdue_by / 3600.0,
+                )
+                program.finished = True
+                session.commit()
+                csession.commit()
+                return 0.0
 
             self.log.debug("Adding program %s to scheduler and starting.", program)
             cprogram = program.chimera_program(pin_start_time=algorithm.pin_start_time)

@@ -32,6 +32,7 @@ converted once with ``scripts/migrate_legacy_config.py``.
 """
 
 import argparse
+import contextlib
 import datetime as dt
 import json
 import logging
@@ -40,6 +41,7 @@ import os
 import random
 import shutil
 import sys
+import tempfile
 import time
 from types import SimpleNamespace
 
@@ -1562,8 +1564,84 @@ def calc_obs_time(session, program, readout_time: float = 0.0) -> float:
 
 def cmd_process_queue(args) -> int:
     """Process the queue like chimera would during an observation
-    (offline simulation; writes 'Simulation:' entries to the observing log)."""
-    factory = _session_factory(args)
+    (offline simulation; writes 'Simulation:' entries to the observing log).
+
+    The simulation runs against a SNAPSHOT of the database and never
+    mutates the live one - see _simulation_snapshot.
+    """
+    live_path = _database_path(args)
+    with _simulation_snapshot(live_path) as snapshot:
+        factory = open_database(snapshot)
+        rc = _process_queue(args, factory)
+        if rc == 0:
+            _copy_simulation_log(snapshot, live_path)
+    return rc
+
+
+@contextlib.contextmanager
+def _simulation_snapshot(live_path: str):
+    """A throwaway copy of the robobs database for the simulation to chew on.
+
+    process-queue walks the night by MARKING PROGRAMS OBSERVED, then used to
+    undo it with
+
+        for program in session.query(Program).filter(Program.finished == True):
+            program.finished = False
+
+    which is not an undo: ``finished`` is also robobs' HANDOVER marker, so
+    that loop un-handed every program already given to the chimera scheduler
+    and made them re-offerable - the double-observation hazard. Anything
+    legitimately finished earlier in the night was silently resurrected too.
+
+    Running on a copy makes the whole question disappear: the simulation can
+    write what it likes, and the live queue is untouched because it was never
+    opened for writing. The database is small (~200 kB at LNA40) so the copy
+    costs nothing. Only the 'Simulation:' log rows are carried back, because
+    that is what plot-log --simulation reads.
+    """
+    fd, path = tempfile.mkstemp(prefix="robobs-sim-", suffix=".db")
+    os.close(fd)
+    try:
+        shutil.copy(live_path, path)
+        yield path
+    finally:
+        for suffix in ("", "-wal", "-shm"):
+            try:
+                os.unlink(path + suffix)
+            except OSError:
+                pass
+
+
+def _copy_simulation_log(snapshot: str, live_path: str) -> None:
+    """Bring the simulated night back to the live database, and nothing else.
+
+    plot-log --simulation reads these rows; every other table stays as the
+    observatory left it.
+    """
+    live = open_database(live_path)()
+    try:
+        live.query(ObservingLog).filter(
+            ObservingLog.action.like("Simulation:%")
+        ).delete(synchronize_session=False)
+        for entry in (
+            open_database(snapshot)()
+            .query(ObservingLog)
+            .filter(ObservingLog.action.like("Simulation:%"))
+        ):
+            live.add(
+                ObservingLog(
+                    time=entry.time,
+                    target_id=entry.target_id,
+                    name=entry.name,
+                    priority=entry.priority,
+                    action=entry.action,
+                )
+            )
+    finally:
+        live.commit()
+
+
+def _process_queue(args, factory) -> int:
     session = factory()
 
     bus, site_proxy = _connect(args, args.site)
@@ -1714,17 +1792,12 @@ def cmd_process_queue(args) -> int:
             tel_pos = target_pos
             session.commit()
 
-        # reset the simulation bookkeeping
-        for program in session.query(Program).filter(Program.finished == True):  # noqa: E712
-            program.finished = False
-
-        allpid = [p.pid for p in session.query(Project)]
-
-        session.commit()
-        for sched in algorithms.values():
-            for pid in allpid:
-                sched.soft_clean(pid)
-
+        # No bookkeeping to undo: this whole run happened on a throwaway
+        # snapshot (see _simulation_snapshot), which is deleted on the way
+        # out. The old reset walked the LIVE database setting finished =
+        # False on every finished program - and finished is also the
+        # handover marker, so it un-handed everything already given to the
+        # chimera scheduler and made it re-offerable.
         session.commit()
 
         if otime < obs_end:

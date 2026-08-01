@@ -408,6 +408,53 @@ def test_pid_config_overrides_stored_scheduling(populated, fake_connect, tmp_pat
     assert session.query(model.Program).count() == 1
 
 
+def test_process_queue_never_mutates_the_live_database(populated, fake_connect):
+    """The simulation must not touch the queue the observatory is serving.
+
+    It walks the night by MARKING PROGRAMS OBSERVED and used to undo that
+    with `for p in query(finished == True): p.finished = False` - which is
+    not an undo: `finished` is also robobs' HANDOVER marker, so the loop
+    un-handed every program already given to the chimera scheduler and made
+    it re-offerable, and resurrected anything legitimately finished earlier
+    in the night. Running on a snapshot removes the question entirely.
+    """
+    db = populated
+    assert _run(db, "make-queue", "--pid", "P01", *_window_args()) == 0
+
+    session = _session(db)
+    # a program handed over to the chimera scheduler earlier tonight, and a
+    # block already observed: both must survive the simulation untouched
+    handed = session.query(model.Program).order_by(model.Program.slew_at).first()
+    handed.finished = True
+    handed.chimera_id = 4242
+    block = session.query(model.ObsBlock).first()
+    block.observed = True
+    session.commit()
+    handed_id = handed.id
+
+    before = {
+        p.id: (p.finished, p.chimera_id) for p in _session(db).query(model.Program)
+    }
+
+    assert _run(db, "process-queue", *_window_args()) == 0
+
+    session = _session(db)
+    after = {p.id: (p.finished, p.chimera_id) for p in session.query(model.Program)}
+    assert after == before, "the simulation rewrote the live queue"
+    assert after[handed_id] == (True, 4242), (
+        "the handover marker was cleared - the program is now re-offerable"
+    )
+    assert session.query(model.ObsBlock).get(block.id).observed is True
+
+    # ...while still producing the plan the plot is drawn from
+    sim = [
+        e
+        for e in session.query(model.ObservingLog)
+        if e.action.startswith("Simulation")
+    ]
+    assert sim, "no simulated night was recorded for plot-log --simulation"
+
+
 def test_process_queue_ignores_a_queue_left_from_an_earlier_night(
     populated, fake_connect, tmp_path
 ):
