@@ -3,6 +3,7 @@
 
 """End-to-end make-queue / process-queue tests (fake site, no bus)."""
 
+import datetime as dt
 import math
 
 import pytest
@@ -405,3 +406,48 @@ def test_pid_config_overrides_stored_scheduling(populated, fake_connect, tmp_pat
     )
     session = _session(db)
     assert session.query(model.Program).count() == 1
+
+
+def test_process_queue_ignores_a_queue_left_from_an_earlier_night(
+    populated, fake_connect, tmp_path
+):
+    """A stale program must not drag the simulated clock into a dead night.
+
+    The clock was widened to min(slew_at) over every unfinished program, so
+    a queue left over from a previous night started the simulation there and
+    the whole phantom night was walked before tonight was reached. On opd-40
+    2026-07-30 a RUP147 program from 07-29 22:15 pulled it back ~24 h, EXOPL
+    was consumed against that dead night and vanished from the plan - while
+    the live scheduler offered it all night. The plan then disagreed with
+    what the telescope actually did.
+    """
+    db = populated
+    assert _run(db, "make-queue", "--pid", "P01", *_window_args()) == 0
+
+    session = _session(db)
+    tonight = min(p.slew_at for p in session.query(model.Program))
+    # one leftover from a night a week ago, still unfinished
+    stale = model.Program(
+        name="last-week", pid="OLD", priority=1, slew_at=tonight - 7.0, finished=False
+    )
+    session.add(stale)
+    session.commit()
+
+    assert _run(db, "process-queue", *_window_args()) == 0
+
+    session = _session(db)
+    sim = [
+        e
+        for e in session.query(model.ObservingLog)
+        if e.action.startswith("Simulation")
+    ]
+    assert sim, "the simulation produced nothing at all"
+    earliest = min(e.time for e in sim)
+    # everything simulated belongs to the requested window, not to the
+    # week-old leftover's night
+    from chimera_robobs.scheduling.dates import datetime_from_jd
+
+    window_start = datetime_from_jd(jd_from_datetime(UT)).replace(tzinfo=None)
+    assert earliest >= window_start - dt.timedelta(hours=6), (
+        f"simulation reached back to {earliest}, before the window at {window_start}"
+    )
