@@ -223,11 +223,26 @@ class RobObsEngine:
         # occultation's constraint would otherwise be lost transitively
         # (seen in simulation: FOCUS replaced the occultation, then a 3.4 h
         # block cut in front of FOCUS and the event was acquired 33 m late).
-        deadline = None
-        if program is not None and self.algorithms[
-            program[1].sched_algorithm
-        ].is_hard_timed(program):
-            deadline = program[0].slew_at
+        def hard_timed_at(candidate):
+            """``candidate``'s instant when it is hard-timed, else None."""
+            if self.algorithms[candidate[1].sched_algorithm].is_hard_timed(candidate):
+                return candidate[0].slew_at
+            return None
+
+        def tighten(current, candidate):
+            """Earliest hard-timed instant seen so far.
+
+            Every reassignment of ``program`` goes through this, and it only
+            ever narrows: a hard-timed candidate that gets replaced by a
+            slippable one is still pending in its queue, so its instant must
+            keep constraining what may be selected after it.
+            """
+            at = hard_timed_at(candidate)
+            if at is None:
+                return current
+            return at if current is None else min(current, at)
+
+        deadline = None if program is None else hard_timed_at(program)
 
         for p in plist[1:]:
             # Get program and program duration (length)
@@ -246,8 +261,7 @@ class RobObsEngine:
                 program, plen = aprogram, aplen
                 waittime = max((program[0].slew_at - nowmjd) * SECONDS_PER_DAY, 0.0)
                 self.log.info("Wait time is: %.2f m", waittime / 60.0)
-                if self.algorithms[program[1].sched_algorithm].is_hard_timed(program):
-                    deadline = program[0].slew_at
+                deadline = tighten(deadline, program)
                 continue
             elif not can_observe:
                 # if the condition is False, the project cannot be executed.
@@ -277,12 +291,11 @@ class RobObsEngine:
                     p,
                 )
                 program, plen, waittime = aprogram, aplen, awaittime
+                deadline = tighten(deadline, program)
             elif (
                 awaittime < waittime
                 and ends_before_deadline
-                and not self.algorithms[program[1].sched_algorithm].is_hard_timed(
-                    program
-                )
+                and hard_timed_at(program) is None
                 and self.check_conditions(
                     program, nowmjd + (awaittime + aplen) / SECONDS_PER_DAY, plen
                 )
@@ -299,6 +312,7 @@ class RobObsEngine:
                     p,
                 )
                 program, plen, waittime = aprogram, aplen, awaittime
+                deadline = tighten(deadline, program)
 
         if program is None:
             # if no project can be executed, return nothing.

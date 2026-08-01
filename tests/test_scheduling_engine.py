@@ -427,3 +427,70 @@ def test_hard_timed_deadline_survives_reference_replacement(session_factory):
     assert selected is not None
     assert selected[0].id == focus.id  # back-fill, not the 4.8 h block
     assert selected[0].id != long_block.id
+
+
+def _add_timed(session, pid, priority, slew_at, *, bound=False):
+    """A TIMED (algorithm 2) program, bound (immovable) or slippable.
+
+    Anything with no timed constraint is pulled forward to ``now`` by
+    ``get_program()``, so only TIMED programs can hold a future ``slew_at``
+    and leave a wait for alternates to compete over.
+    """
+    program = _add_program(session, pid, priority, slew_at=slew_at)
+    blockpar = session.query(model.BlockPar).filter(model.BlockPar.pid == pid).one()
+    blockpar.sched_algorithm = 2
+    entry = model.TimedDB(pid=pid, execute_at=slew_at)
+    if bound:
+        block = session.query(model.ObsBlock).filter(model.ObsBlock.pid == pid).one()
+        entry.bound = True
+        entry.target_id = program.target_id
+        entry.block_id = block.id
+    session.add(entry)
+    session.commit()
+    return program
+
+
+def test_hard_timed_deadline_armed_when_promoted_from_the_alternates(session_factory):
+    """The occultation need not be the priority-0 reference to protect its
+    instant, and the protection must survive a back-fill in front of it.
+
+    opd-40, night of 2026-07-30 simulated against the production database:
+    CAL's morning flats were the priority-1 reference (slippable, so no
+    deadline was armed), OPOP was promoted over them as a fitting alternate
+    WITHOUT arming its instant, BAPT then back-filled in front of OPOP —
+    leaving a slippable program as the baseline — and BRUCH's 3.4 h block
+    took the observable-later branch against a vacuously-true
+    ``ends_before_deadline``.  The occultation was acquired 02:10 UT
+    against a 01:34:51 bound instant: 36 min late, 23 min after the event
+    was over.
+
+    The back-fill chain is what makes this bite; with OPOP alone as the
+    selection the long block is already refused, because that branch will
+    not displace a hard-timed program.
+    """
+    session = session_factory()
+    engine, site = _engine(session_factory)
+    now = site.mjd()
+
+    # priority-1 reference, slippable, far enough away to leave a long wait
+    _add_timed(session, "CAL", 1, now + 0.4)  # 9.6 h away
+
+    # the occultation: only ever a promoted alternate here, never reference
+    occ = _add_timed(session, "OPOP", 2, now + 0.1, bound=True)  # 2.4 h away
+
+    # the back-fill: 60 s block ~30 min out, fits comfortably before the
+    # occultation and replaces it as the comparison baseline
+    backfill = _add_timed(session, "BAPT", 3, now + 0.02)
+
+    # the 3.4 h block: observable right now, ends well past the occultation
+    long_block = _add_program(session, "PLO", 5, slew_at=0.0)
+    block = session.query(model.ObsBlock).filter(model.ObsBlock.pid == "PLO").one()
+    block.length = 0.2 * 86400.0  # 4.8 h
+    session.commit()
+
+    selected = engine.reschedule(now)
+    assert selected is not None
+    assert selected[0].id != long_block.id  # would swallow the occultation
+    assert selected[0].id == backfill.id  # back-fill in front is still fine
+    # and what was selected does end before the occultation's instant
+    assert selected[0].slew_at + 60.0 / 86400.0 <= occ.slew_at
