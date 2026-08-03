@@ -494,3 +494,91 @@ def test_hard_timed_deadline_armed_when_promoted_from_the_alternates(session_fac
     assert selected[0].id == backfill.id  # back-fill in front is still fine
     # and what was selected does end before the occultation's instant
     assert selected[0].slew_at + 60.0 / 86400.0 <= occ.slew_at
+
+
+def _set_scheduling(session, pid, **keys):
+    """Write a project's scheduling config the way add-project does."""
+    import json
+
+    project = session.query(model.Project).filter(model.Project.pid == pid).first()
+    if project is None:
+        project = model.Project(pid=pid, pi="t", abstract="t", url="t", priority=1)
+        session.add(project)
+    project.scheduling = json.dumps(keys)
+    session.commit()
+
+
+def test_night_boundary_defaults_to_the_site_night(session_factory):
+    """No key, and an unknown value, both fall back to the night bracket."""
+    session = session_factory()
+    _add_program(session, "P01", 1, slew_at=61000.0)
+    engine, site = _engine(session_factory)
+
+    assert engine._night_boundary("P01") == "night"
+    _set_scheduling(session, "P01", night_boundary="midnight")
+    engine._boundary_cache.clear()
+    assert engine._night_boundary("P01") == "night"
+
+
+def test_night_boundary_twilight_widens_the_observable_night(session_factory):
+    """In the band between the two brackets, a twilight-bracket project is
+    observable and a default one is not."""
+    import datetime as dt
+
+    class BandSite(FakeSite):
+        """Next-event semantics inside the twilight bracket only: its dawn
+        comes first, the night bracket's dusk is still ahead."""
+
+        def sunset_twilight_end(self, date=None):  # -18 dusk, still ahead
+            return self._parse(date) + dt.timedelta(hours=1)
+
+        def sunrise_twilight_begin(self, date=None):  # -18 dawn, after it
+            return self._parse(date) + dt.timedelta(hours=13)
+
+        def sunset_twilight_begin(
+            self, date=None
+        ):  # -12 dusk: passed, next is tomorrow
+            return self._parse(date) + dt.timedelta(hours=24)
+
+        def sunrise_twilight_end(self, date=None):  # -12 dawn: comes first
+            return self._parse(date) + dt.timedelta(hours=12)
+
+    session = session_factory()
+    _add_program(session, "PWIDE", 1, slew_at=61000.0)
+    _add_program(session, "PNARROW", 2, slew_at=61000.0)
+    _set_scheduling(session, "PWIDE", night_boundary="twilight")
+    _set_scheduling(session, "PNARROW")
+
+    site = BandSite(latitude=0.0, lst_rads=10.0 * math.pi / 12.0)
+    engine = RobObsEngine(session_factory, site, log=LOG)
+
+    def rows(pid):
+        return (
+            session.query(model.Program, model.BlockPar, model.ObsBlock, model.Target)
+            .join(model.BlockPar, model.Program.blockpar_id == model.BlockPar.id)
+            .join(model.ObsBlock, model.Program.obsblock_id == model.ObsBlock.id)
+            .join(model.Target, model.Program.target_id == model.Target.id)
+            .filter(model.Program.pid == pid)
+            .one()
+        )
+
+    assert not engine.check_conditions(rows("PNARROW"), 61000.0)
+    assert engine.check_conditions(rows("PWIDE"), 61000.0)
+
+
+def test_night_boundary_never_waives_the_other_checks(session_factory):
+    """It moves the night, it does not excuse the block."""
+    session = session_factory()
+    _add_program(session, "PWIDE", 1, slew_at=61000.0, max_airmass=0.5)
+    _set_scheduling(session, "PWIDE", night_boundary="twilight")
+
+    site = FakeSite(latitude=0.0, lst_rads=10.0 * math.pi / 12.0, daytime=True)
+    engine = RobObsEngine(session_factory, site, log=LOG)
+    rows = (
+        session.query(model.Program, model.BlockPar, model.ObsBlock, model.Target)
+        .join(model.BlockPar, model.Program.blockpar_id == model.BlockPar.id)
+        .join(model.ObsBlock, model.Program.obsblock_id == model.ObsBlock.id)
+        .join(model.Target, model.Program.target_id == model.Target.id)
+        .one()
+    )
+    assert not engine.check_conditions(rows, 61000.0)

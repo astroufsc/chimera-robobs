@@ -135,6 +135,7 @@ PID_CONFIG_KEYS = {
     "n_filters",
     "lookback",
     "flat_sun_alt",
+    "night_boundary",
 }
 
 #: legacy CSV column names -> Target columns.  The production pointing CSVs
@@ -1299,7 +1300,7 @@ def cmd_clean_queue(args) -> int:
     return 0
 
 
-def make_times(args, site: SiteAdapter) -> SimpleNamespace:
+def make_times(args, site: SiteAdapter, boundary: str = "night") -> SimpleNamespace:
     """Determine the start/end times of the night (legacy ``mktimes``).
 
     The default window is the night after *today's* evening twilight — which,
@@ -1307,18 +1308,50 @@ def make_times(args, site: SiteAdapter) -> SimpleNamespace:
     in progress.  ``--tonight`` resolves the CURRENT night instead: from now
     (if already dark) or the coming evening twilight, to the morning twilight
     that ends it.
+
+    ``boundary`` picks the project's night bracket.  It must match the
+    engine's: ``parse_time_entry`` drops entries outside
+    [obs_start, obs_end], so a wider-bracket entry is discarded here before
+    the guard is ever consulted.
     """
+
+    def dusk_of(when):
+        if boundary == "twilight":
+            return (
+                site.sunset_twilight_begin()
+                if when is None
+                else site.sunset_twilight_begin(when)
+            )
+        return (
+            site.sunset_twilight_end()
+            if when is None
+            else site.sunset_twilight_end(when)
+        )
+
+    def dawn_of(when):
+        if boundary == "twilight":
+            return (
+                site.sunrise_twilight_end()
+                if when is None
+                else site.sunrise_twilight_end(when)
+            )
+        return (
+            site.sunrise_twilight_begin()
+            if when is None
+            else site.sunrise_twilight_begin(when)
+        )
+
     if getattr(args, "tonight", False):
         now = site.ut()
-        obs_start = site.sunset_twilight_end(now)  # next evening twilight
-        obs_end = site.sunrise_twilight_begin(now)  # next morning twilight
+        obs_start = dusk_of(now)  # next evening twilight
+        obs_end = dawn_of(now)  # next morning twilight
         if obs_end < obs_start:
             # the morning twilight comes first: we are inside a night —
             # schedule the remainder of it, starting now
             obs_start = now
     else:
-        obs_start = site.sunset_twilight_end()
-        obs_end = site.sunrise_twilight_begin(obs_start)
+        obs_start = dusk_of(None)
+        obs_end = dawn_of(obs_start)
 
     if getattr(args, "jd_start", None):
         obs_start = datetime_from_jd(args.jd_start)
@@ -1471,7 +1504,7 @@ def cmd_make_queue(args) -> int:
     bus, site_proxy = _connect(args, args.site)
     try:
         site = SiteAdapter(site_proxy)
-        times = make_times(args, site)
+        times = make_times(args, site, pgrconfig.get("night_boundary", "night"))
         lst_start = pool_lst_start(times.lst_start - 2.0, pgrconfig)
         lst_end = times.lst_end + 2.0
         if lst_start != times.lst_start - 2.0:
