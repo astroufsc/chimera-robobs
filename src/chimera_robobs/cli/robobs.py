@@ -135,6 +135,7 @@ PID_CONFIG_KEYS = {
     "n_filters",
     "lookback",
     "flat_sun_alt",
+    "night_boundary",
 }
 
 #: legacy CSV column names -> Target columns.  The production pointing CSVs
@@ -428,20 +429,33 @@ def cmd_clean_project(args) -> int:
 # ----------------------------------------------------------------------
 
 
-def add_targets_from_table(session, targets_table) -> list:
+def add_targets_from_table(session, targets_table, match_by_name=False) -> list:
     """Add targets from an astropy table (CSV) to the database.
 
-    Returns the list of added :class:`Target` rows (populated ids after the
-    commit), in file order.
+    Returns the list of :class:`Target` rows the file describes (populated
+    ids after the commit), in file order.
 
-    The table is APPEND-ONLY: rows are never updated and never matched
-    against what is already there.  Names are not unique - two projects may
-    each have a ``std`` or a ``test`` - so there is nothing to match on, and
-    a reload must leave the old rows alone anyway: the observing log stores
-    target ids, and rewriting or deleting them orphans every observation
-    already recorded against them.  A reload appends a fresh set and the
-    project's new blocks point at those; the previous rows stay behind as
-    the history the log refers to.
+    By default the table is APPEND-ONLY: rows are never updated and never
+    matched against what is already there.  Names are not unique - two
+    projects may each have a ``std`` or a ``test`` - so in general there is
+    nothing to match on, and a reload must leave the old rows alone anyway:
+    the observing log stores target ids, and rewriting or deleting them
+    orphans every observation already recorded against them.  A reload
+    appends a fresh set and the project's new blocks point at those; the
+    previous rows stay behind as the history the log refers to.
+
+    ``match_by_name`` opts out of that, for the generated inputs whose names
+    ARE unique by construction (the OPOP occultations are
+    ``<object>_<event_id>``).  An existing row of the same name is reused and
+    its coordinates refreshed in place, so ingesting a regenerated file is
+    idempotent and target ids stay stable - which is what lets the ingest be
+    automated at all: without it, keeping the inputs current means
+    ``delete-project`` + ``clean-targets`` on every run, orphaning the log
+    entry of every occultation already observed.
+
+    A name matching more than one existing row is refused rather than
+    guessed at, the same rule ``plot-log`` uses when resolving an orphaned
+    log entry by name.
     """
     columns = {name.lower().strip(): name for name in targets_table.dtype.names}
 
@@ -477,6 +491,22 @@ def add_targets_from_table(session, targets_table) -> list:
                 else:
                     tpar[column] = str(value).strip()
 
+        name = tpar.get("name")
+        if match_by_name and name:
+            matches = session.query(Target).filter(Target.name == name).all()
+            if len(matches) > 1:
+                raise ValueError(
+                    f"{len(matches)} targets are named {name!r}; --match-by-name "
+                    "cannot tell which one the file means"
+                )
+            if matches:
+                target = matches[0]
+                _out(f"--Updating {name} (id {target.id})...")
+                for column, value in tpar.items():
+                    setattr(target, column, value)
+                added.append(target)
+                continue
+
         target = Target(**tpar)
         _out(f"--Adding {target.name}...")
         session.add(target)
@@ -500,7 +530,9 @@ def cmd_add_targets(args) -> int:
 
     session = _session_factory(args)()
     try:
-        add_targets_from_table(session, targets_table)
+        add_targets_from_table(
+            session, targets_table, match_by_name=getattr(args, "match_by_name", False)
+        )
     except ValueError as e:
         _err(f"*{e}")
         return 1
@@ -1299,7 +1331,7 @@ def cmd_clean_queue(args) -> int:
     return 0
 
 
-def make_times(args, site: SiteAdapter) -> SimpleNamespace:
+def make_times(args, site: SiteAdapter, boundary: str = "night") -> SimpleNamespace:
     """Determine the start/end times of the night (legacy ``mktimes``).
 
     The default window is the night after *today's* evening twilight — which,
@@ -1307,18 +1339,50 @@ def make_times(args, site: SiteAdapter) -> SimpleNamespace:
     in progress.  ``--tonight`` resolves the CURRENT night instead: from now
     (if already dark) or the coming evening twilight, to the morning twilight
     that ends it.
+
+    ``boundary`` picks the project's night bracket.  It must match the
+    engine's: ``parse_time_entry`` drops entries outside
+    [obs_start, obs_end], so a wider-bracket entry is discarded here before
+    the guard is ever consulted.
     """
+
+    def dusk_of(when):
+        if boundary == "twilight":
+            return (
+                site.sunset_twilight_begin()
+                if when is None
+                else site.sunset_twilight_begin(when)
+            )
+        return (
+            site.sunset_twilight_end()
+            if when is None
+            else site.sunset_twilight_end(when)
+        )
+
+    def dawn_of(when):
+        if boundary == "twilight":
+            return (
+                site.sunrise_twilight_end()
+                if when is None
+                else site.sunrise_twilight_end(when)
+            )
+        return (
+            site.sunrise_twilight_begin()
+            if when is None
+            else site.sunrise_twilight_begin(when)
+        )
+
     if getattr(args, "tonight", False):
         now = site.ut()
-        obs_start = site.sunset_twilight_end(now)  # next evening twilight
-        obs_end = site.sunrise_twilight_begin(now)  # next morning twilight
+        obs_start = dusk_of(now)  # next evening twilight
+        obs_end = dawn_of(now)  # next morning twilight
         if obs_end < obs_start:
             # the morning twilight comes first: we are inside a night —
             # schedule the remainder of it, starting now
             obs_start = now
     else:
-        obs_start = site.sunset_twilight_end()
-        obs_end = site.sunrise_twilight_begin(obs_start)
+        obs_start = dusk_of(None)
+        obs_end = dawn_of(obs_start)
 
     if getattr(args, "jd_start", None):
         obs_start = datetime_from_jd(args.jd_start)
@@ -1471,7 +1535,7 @@ def cmd_make_queue(args) -> int:
     bus, site_proxy = _connect(args, args.site)
     try:
         site = SiteAdapter(site_proxy)
-        times = make_times(args, site)
+        times = make_times(args, site, pgrconfig.get("night_boundary", "night"))
         lst_start = pool_lst_start(times.lst_start - 2.0, pgrconfig)
         lst_end = times.lst_end + 2.0
         if lst_start != times.lst_start - 2.0:
@@ -1976,6 +2040,15 @@ def main(argv: list[str] | None = None) -> int:
 
     p = sub.add_parser("add-targets", help="add targets from a CSV file")
     p.add_argument("-f", "--file", dest="filename", required=True)
+    p.add_argument(
+        "--match-by-name",
+        action="store_true",
+        help="reuse an existing target of the same name instead of appending "
+        "a duplicate, keeping its row id (and so the observing log's "
+        "references) stable. Only for generated inputs whose names are "
+        "unique by construction, like the OPOP occultations; the default "
+        "stays append-only because names are not unique in general.",
+    )
     p.set_defaults(func=cmd_add_targets)
 
     p = sub.add_parser(

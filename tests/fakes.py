@@ -88,6 +88,19 @@ class FakeSite:
             return date + dt.timedelta(hours=13)
         return date + dt.timedelta(hours=self._night_length)
 
+    # The twilight bracket: wider than the pair above, as the real Site.
+    def sunset_twilight_begin(self, date=None) -> dt.datetime:
+        date = self._parse(date)
+        if self._daytime:
+            return date + dt.timedelta(hours=0.5)
+        return date + dt.timedelta(hours=24)
+
+    def sunrise_twilight_end(self, date=None) -> dt.datetime:
+        date = self._parse(date)
+        if self._daytime:
+            return date + dt.timedelta(hours=13.5)
+        return date + dt.timedelta(hours=self._night_length + 0.5)
+
     def sunset(self, date=None) -> dt.datetime:
         # next-event semantics like the real Site: queried from 6 h before
         # dusk (as the skyflat algorithm does), the sunset lands 1.3 h

@@ -66,6 +66,18 @@ class SiteAdapter:
             return ensure_datetime(self._site.sunrise_twilight_begin())
         return ensure_datetime(self._site.sunrise_twilight_begin(self._date_arg(date)))
 
+    # The pair below brackets the night at ``horizon["twilight"]`` instead
+    # of ``horizon["night"]``: same instants, wider bracket.
+    def sunset_twilight_begin(self, date: dt.datetime | None = None) -> dt.datetime:
+        if date is None:
+            return ensure_datetime(self._site.sunset_twilight_begin())
+        return ensure_datetime(self._site.sunset_twilight_begin(self._date_arg(date)))
+
+    def sunrise_twilight_end(self, date: dt.datetime | None = None) -> dt.datetime:
+        if date is None:
+            return ensure_datetime(self._site.sunrise_twilight_end())
+        return ensure_datetime(self._site.sunrise_twilight_end(self._date_arg(date)))
+
     def sunset(self, date: dt.datetime | None = None) -> dt.datetime:
         """Next sunset (horizon 0) after ``date`` — for sky-flat windows."""
         if date is None:
