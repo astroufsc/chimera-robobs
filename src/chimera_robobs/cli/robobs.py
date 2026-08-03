@@ -428,20 +428,26 @@ def cmd_clean_project(args) -> int:
 # ----------------------------------------------------------------------
 
 
-def add_targets_from_table(session, targets_table) -> list:
+def add_targets_from_table(session, targets_table, match_by_name=False) -> list:
     """Add targets from an astropy table (CSV) to the database.
 
-    Returns the list of added :class:`Target` rows (populated ids after the
-    commit), in file order.
+    Returns the list of :class:`Target` rows the file describes (populated
+    ids after the commit), in file order.
 
-    The table is APPEND-ONLY: rows are never updated and never matched
-    against what is already there.  Names are not unique - two projects may
-    each have a ``std`` or a ``test`` - so there is nothing to match on, and
-    a reload must leave the old rows alone anyway: the observing log stores
-    target ids, and rewriting or deleting them orphans every observation
-    already recorded against them.  A reload appends a fresh set and the
-    project's new blocks point at those; the previous rows stay behind as
-    the history the log refers to.
+    By default the table is APPEND-ONLY: rows are never updated and never
+    matched against what is already there.  Names are not unique - two
+    projects may each have a ``std`` or a ``test`` - so in general there is
+    nothing to match on, and a reload must leave the old rows alone anyway:
+    the observing log stores target ids, and rewriting or deleting them
+    orphans every observation already recorded against them.  A reload
+    appends a fresh set and the project's new blocks point at those; the
+    previous rows stay behind as the history the log refers to.
+
+    ``match_by_name`` opts out of that, for generated inputs whose names are
+    unique by construction.  An existing row of the same name is reused and
+    its coordinates refreshed, so re-ingesting is idempotent and ids stay
+    stable.  A name matching more than one row is refused rather than
+    guessed at.
     """
     columns = {name.lower().strip(): name for name in targets_table.dtype.names}
 
@@ -477,6 +483,22 @@ def add_targets_from_table(session, targets_table) -> list:
                 else:
                     tpar[column] = str(value).strip()
 
+        name = tpar.get("name")
+        if match_by_name and name:
+            matches = session.query(Target).filter(Target.name == name).all()
+            if len(matches) > 1:
+                raise ValueError(
+                    f"{len(matches)} targets are named {name!r}; --match-by-name "
+                    "cannot tell which one the file means"
+                )
+            if matches:
+                target = matches[0]
+                _out(f"--Updating {name} (id {target.id})...")
+                for column, value in tpar.items():
+                    setattr(target, column, value)
+                added.append(target)
+                continue
+
         target = Target(**tpar)
         _out(f"--Adding {target.name}...")
         session.add(target)
@@ -500,7 +522,9 @@ def cmd_add_targets(args) -> int:
 
     session = _session_factory(args)()
     try:
-        add_targets_from_table(session, targets_table)
+        add_targets_from_table(
+            session, targets_table, match_by_name=getattr(args, "match_by_name", False)
+        )
     except ValueError as e:
         _err(f"*{e}")
         return 1
@@ -1976,6 +2000,14 @@ def main(argv: list[str] | None = None) -> int:
 
     p = sub.add_parser("add-targets", help="add targets from a CSV file")
     p.add_argument("-f", "--file", dest="filename", required=True)
+    p.add_argument(
+        "--match-by-name",
+        action="store_true",
+        help="reuse an existing target of the same name instead of appending "
+        "a duplicate, keeping its row id stable. Only for generated inputs "
+        "whose names are unique by construction; the default stays "
+        "append-only because names are not unique in general.",
+    )
     p.set_defaults(func=cmd_add_targets)
 
     p = sub.add_parser(

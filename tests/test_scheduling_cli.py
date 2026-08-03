@@ -132,6 +132,58 @@ def test_add_targets_from_csv(tmp_path, db):
     assert targets[1].target_dec == pytest.approx(5.0)
 
 
+def test_add_targets_is_append_only_by_default(tmp_path, db):
+    """The default must not change: names are not unique in general."""
+    filename = _write(tmp_path, "targets.csv", TARGETS_CSV)
+    assert _run(db, "add-targets", "-f", filename) == 0
+    assert _run(db, "add-targets", "-f", filename) == 0
+
+    session = _session(db)
+    assert [t.name for t in session.query(model.Target).order_by(model.Target.id)] == [
+        "NGC0001",
+        "NGC0002",
+        "NGC0001",
+        "NGC0002",
+    ]
+
+
+def test_add_targets_match_by_name_reuses_the_row(tmp_path, db):
+    """Idempotent re-ingest, and the row id survives - it is what the
+    observing log references."""
+    filename = _write(tmp_path, "targets.csv", TARGETS_CSV)
+    assert _run(db, "add-targets", "-f", filename) == 0
+    ids = {t.name: t.id for t in _session(db).query(model.Target)}
+
+    # same names, moved coordinates - a refreshed prediction
+    moved = _write(
+        tmp_path,
+        "targets2.csv",
+        "RA,DEC,NAME,MAG,FILTER\n"
+        "12:00:00,-30:00:00,NGC0001,12.5,V\n"
+        "11:30:00,+05:00:00,NGC0002,13.0,V\n",
+    )
+    assert _run(db, "add-targets", "-f", moved, "--match-by-name") == 0
+
+    session = _session(db)
+    targets = session.query(model.Target).order_by(model.Target.id).all()
+    assert [t.name for t in targets] == ["NGC0001", "NGC0002"]  # no duplicates
+    assert {t.name: t.id for t in targets} == ids  # ids preserved
+    assert targets[0].target_ra == pytest.approx(12.0)  # coordinates refreshed
+    assert targets[0].target_dec == pytest.approx(-30.0)
+
+
+def test_add_targets_match_by_name_refuses_an_ambiguous_name(tmp_path, db):
+    """Two rows of the same name: refuse rather than guess."""
+    filename = _write(tmp_path, "targets.csv", TARGETS_CSV)
+    assert _run(db, "add-targets", "-f", filename) == 0
+    assert _run(db, "add-targets", "-f", filename) == 0  # now two of each
+
+    assert _run(db, "add-targets", "-f", filename, "--match-by-name") == 1
+    # and nothing was written by the failed run
+    session = _session(db)
+    assert session.query(model.Target).count() == 4
+
+
 def test_add_observing_block(tmp_path, db):
     _run(
         db,
