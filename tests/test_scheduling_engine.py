@@ -496,6 +496,40 @@ def test_hard_timed_deadline_armed_when_promoted_from_the_alternates(session_fac
     assert selected[0].slew_at + 60.0 / 86400.0 <= occ.slew_at
 
 
+def test_trivially_earlier_alternate_does_not_delay_a_higher_priority_program(
+    session_factory,
+):
+    """The observable-later branch must not trade a big delay for a small
+    gain: a marginally earlier start does not justify displacing a much
+    higher-priority program by far longer."""
+    session = session_factory()
+    engine, site = _engine(session_factory)
+    now = site.mjd()
+
+    # reference far off, so both alternates have a real wait to compete over
+    _add_timed(session, "P01", 1, now + 0.4)
+
+    # the ranked program: short block, starts in 24 min
+    ranked = _add_timed(session, "TOP", 3, now + 24 * 60 / 86400.0)
+    session.query(model.ObsBlock).filter(
+        model.ObsBlock.pid == "TOP"
+    ).one().length = 125.0
+    # the filler: 52 s earlier, but a 28 min block that pushes TOP well back
+    filler = _add_timed(session, "FILL", 90, now + (24 * 60 - 52) / 86400.0)
+    session.query(model.ObsBlock).filter(
+        model.ObsBlock.pid == "FILL"
+    ).one().length = 1680.0
+    session.commit()
+
+    selected = engine.reschedule(now)
+
+    assert selected is not None
+    assert selected[0].id == ranked.id, (
+        "a 28 min filler displaced a higher-priority program to start 52 s sooner"
+    )
+    assert selected[0].id != filler.id
+
+
 def _set_scheduling(session, pid, **keys):
     """Write a project's scheduling config the way add-project does."""
     import json
