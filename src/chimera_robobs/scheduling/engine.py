@@ -11,6 +11,7 @@ simulation.  A *program* here is the 4-tuple
 """
 
 import datetime as dt
+import json
 import logging
 from collections.abc import Callable
 
@@ -27,6 +28,7 @@ from chimera_robobs.scheduling.model import (
     BlockPar,
     ObsBlock,
     Program,
+    Project,
     Target,
     block_duration,
 )
@@ -69,6 +71,9 @@ class RobObsEngine:
         self.site = site
         self.log = log or module_log
         self.seeing = seeing
+        # pid -> bracket, per reschedule() pass; also used when
+        # check_conditions is called on its own
+        self._boundary_cache: dict[str, str] = {}
         self.overheads = {
             "readout": 0.0,
             "autofocus": 0.0,
@@ -159,12 +164,52 @@ class RobObsEngine:
         session.close()
         return None, 0.0
 
+    #: Brackets a project may observe to, from Site's ``horizon`` config.
+    #: ``twilight`` is the wider one; the core validates night < twilight,
+    #: so it can never reach daylight.  A boundary, not a waiver: every
+    #: other condition still applies.
+    NIGHT_BOUNDARIES = ("night", "twilight")
+
+    def _night_boundary(self, pid: str) -> str:
+        """Which bracket ``pid`` observes to, memoised for one pass."""
+        if pid in self._boundary_cache:
+            return self._boundary_cache[pid]
+        boundary = "night"
+        session = self.session()
+        try:
+            project = session.query(Project).filter(Project.pid == pid).first()
+            scheduling = (
+                json.loads(project.scheduling) if project and project.scheduling else {}
+            )
+            value = str(scheduling.get("night_boundary", "night")).strip().lower()
+            if value in self.NIGHT_BOUNDARIES:
+                boundary = value
+            elif value:
+                self.log.warning(
+                    "project %s: unknown night_boundary %r, using 'night'", pid, value
+                )
+        except (ValueError, TypeError):
+            self.log.exception("project %s: unreadable scheduling config", pid)
+        self._boundary_cache[pid] = boundary
+        return boundary
+
+    def _night_bounds(self, pid: str, guard_time: dt.datetime):
+        """(next dusk, next dawn) for ``pid``'s bracket, tz-naive."""
+        if self._night_boundary(pid) == "twilight":
+            dusk = self.site.sunset_twilight_begin(guard_time)
+            dawn = self.site.sunrise_twilight_end(guard_time)
+        else:
+            dusk = self.site.sunset_twilight_end(guard_time)
+            dawn = self.site.sunrise_twilight_begin(guard_time)
+        return dusk.replace(tzinfo=None), dawn.replace(tzinfo=None)
+
     def reschedule(self, now: float | None = None):
         """Choose the next program to execute (or ``None``).
 
         :param now: MJD to schedule for (defaults to the current site MJD).
         """
         nowmjd = self.site.mjd() if now is None else now
+        self._boundary_cache = {}  # stale after a reload, so per pass
 
         # Get a list of priorities
         plist = self.get_priority_list()
@@ -378,10 +423,7 @@ class RobObsEngine:
             # dusk instant and the MJD round trip loses microseconds, which
             # must not flip the decision to "daytime".
             guard_time = date_time + dt.timedelta(minutes=1)
-            next_dusk = self.site.sunset_twilight_end(guard_time).replace(tzinfo=None)
-            next_dawn = self.site.sunrise_twilight_begin(guard_time).replace(
-                tzinfo=None
-            )
+            next_dusk, next_dawn = self._night_bounds(program[0].pid, guard_time)
             if next_dusk < next_dawn:
                 self.log.warning(
                     "Daytime @ %s (next dusk %s < next dawn %s): not observable.",
