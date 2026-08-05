@@ -14,8 +14,10 @@ inline can exhaust the pool and deadlock the bus (and the legacy handler
 even slept for five minutes there when the queue was empty).
 """
 
+import datetime as dt
 import enum
 import logging.handlers
+import math
 import os
 import threading
 
@@ -24,15 +26,19 @@ from chimera.controllers.scheduler.states import State as SchedState
 from chimera.controllers.scheduler.status import SchedulerStatus
 from chimera.core.chimeraobject import ChimeraObject
 from chimera.core.constants import SYSTEM_CONFIG_DIRECTORY
+from sqlalchemy import func as sqla_func
 from sqlalchemy import or_
 
-from chimera_robobs.scheduling.algorithms import build_algorithms
-from chimera_robobs.scheduling.dates import datetime_from_mjd
+from chimera_robobs.scheduling.algorithms import ALGORITHM_YAML_NAMES, build_algorithms
+from chimera_robobs.scheduling.dates import datetime_from_mjd, mjd_from_datetime
 from chimera_robobs.scheduling.engine import RobObsEngine
 from chimera_robobs.scheduling.model import (
+    DEFAULT_ROBOBS_DATABASE,
     BlockPar,
+    ObsBlock,
     ObservingLog,
     Program,
+    TimedDB,
     open_database,
 )
 from chimera_robobs.scheduling.siteadapter import SiteAdapter
@@ -52,6 +58,14 @@ UNPINNED_DUE_TOLERANCE = 30.0
 STALE_PROGRAM_AGE = 12 * 3600.0
 
 SECONDS_PER_DAY = 86400.0
+
+#: hours around the astronomical night still counted as "tonight" by
+#: ``status()`` (twilight calibrations are anchored at sunset, before the
+#: -18 deg dusk)
+STATUS_NIGHT_MARGIN = 6.0 / 24.0
+
+#: observing-log entries included in a ``status()`` snapshot
+STATUS_LOG_TAIL = 20
 
 
 class RobState(enum.Enum):
@@ -495,6 +509,223 @@ class RobObs(ChimeraObject):
         """Return a short human-readable status (proxy/JSON friendly)."""
         machine_state = self.machine.state().value if self.machine else None
         return f"robstate={self.rob_state.value} machine={machine_state}"
+
+    def status(self) -> dict:
+        """One JSON-safe snapshot of the running night.
+
+        Every question the operator used to answer with sqlite queries and
+        log greps, served from the data this controller already owns.
+        Rendered by ``chimera-robobs status``; the payload is plain
+        str/int/float/bool/None so it crosses the bus as JSON unharmed.
+        """
+        status = {
+            "schema": 1,
+            "time_utc": dt.datetime.now(dt.UTC).isoformat(),
+            "robobs": {
+                "state": self.rob_state.value,
+                "machine": self.machine.state().value if self.machine else None,
+                "events_connected": self._events_connected,
+                "consecutive_errors": self._consecutive_errors,
+                "max_consecutive_errors": int(self["max_consecutive_errors"]),
+                "no_program_on_queue": self._no_program_on_queue,
+                "database": self["database"] or DEFAULT_ROBOBS_DATABASE,
+            },
+            "night": None,
+            "scheduler": self._status_scheduler(),
+            "programs": [],
+            "occurrences": {},
+            "log": [],
+            "handed": [],
+            "errors": {},
+        }
+
+        try:
+            status["night"] = self._status_night()
+        except Exception as e:
+            status["errors"]["night"] = str(e)
+
+        if self._session is not None:
+            session = self._session()
+            try:
+                status["programs"] = self._status_programs(session, status["night"])
+                status["occurrences"] = self._status_occurrences(session)
+                status["log"] = self._status_log(session)
+            except Exception as e:
+                status["errors"]["database"] = str(e)
+            finally:
+                session.commit()
+
+        for chimera_id, info in list(self._handed.items()):
+            program = info[0]
+            status["handed"].append(
+                {
+                    "chimera_id": chimera_id,
+                    "program_id": program.id,
+                    "pid": program.pid,
+                    "name": program.name,
+                    "priority": program.priority,
+                    "slew_at": program.slew_at,
+                    "handed_at": program.handed_at,
+                    "begun": chimera_id in self._begun,
+                }
+            )
+        return status
+
+    def _status_night(self) -> dict | None:
+        """Tonight's bracket (MJD): the running night when the sun is down,
+        the coming one otherwise."""
+        if self._site is None:
+            return None
+        site = self._site
+        now = site.ut()
+        next_dawn = site.sunrise_twilight_begin(now)
+        next_dusk = site.sunset_twilight_end(now)
+        is_night = next_dawn < next_dusk
+        if is_night:
+            dawn = next_dawn
+            dusk = site.sunset_twilight_end(dawn - dt.timedelta(hours=24))
+        else:
+            dusk = next_dusk
+            dawn = site.sunrise_twilight_begin(dusk)
+        return {
+            "now": mjd_from_datetime(now),
+            "dusk": mjd_from_datetime(dusk),
+            "dawn": mjd_from_datetime(dawn),
+            "is_night": is_night,
+            "lst_hours": site.lst_in_rads() * 12.0 / math.pi,
+            "sun_altitude": site.sun_altitude(),
+            "moon_phase": site.moon_phase(),
+        }
+
+    def _status_scheduler(self) -> dict:
+        info = {
+            "location": self._scheduler_list[0] if self._scheduler_list else None,
+            "state": None,
+            "queue_len": None,
+            "current_program": None,
+            "current_action": None,
+            "error": None,
+        }
+        try:
+            sched = self.get_scheduler()
+            info["state"] = str(sched.state())
+            info["current_program"] = sched.current_program()
+            info["current_action"] = sched.current_action()
+        except Exception as e:
+            info["error"] = str(e)
+        try:
+            csession = chimera_model.Session()
+            info["queue_len"] = int(
+                csession.query(chimera_model.Program)
+                .filter(chimera_model.Program.finished == False)  # noqa: E712
+                .count()
+            )
+            csession.commit()
+        except Exception as e:
+            info["error"] = info["error"] or str(e)
+        return info
+
+    def _status_programs(self, session, night: dict | None) -> list[dict]:
+        """Tonight's queue programs, oldest first.
+
+        The window covers the astronomical night plus the twilight margin;
+        unfinished or handed programs are always included, whatever their
+        slot - a stale entry left from an earlier night is exactly what the
+        operator needs to see.
+        """
+        if night is not None:
+            lo = night["dusk"] - STATUS_NIGHT_MARGIN
+            hi = night["dawn"] + STATUS_NIGHT_MARGIN
+        else:
+            now = mjd_from_datetime(dt.datetime.now(dt.UTC))
+            lo, hi = now - 0.5, now + 0.5
+
+        rows = (
+            session.query(Program, BlockPar, ObsBlock)
+            .outerjoin(BlockPar, Program.blockpar_id == BlockPar.id)
+            .outerjoin(ObsBlock, Program.obsblock_id == ObsBlock.id)
+            .filter(
+                or_(
+                    Program.slew_at.between(lo, hi),
+                    Program.finished == False,  # noqa: E712
+                    Program.handed_at != None,  # noqa: E711
+                )
+            )
+            .order_by(Program.slew_at, Program.id)
+            .all()
+        )
+
+        programs = []
+        for program, blockpar, obsblock in rows:
+            if program.handed_at is not None:
+                # only a program whose program_begin was seen is executing
+                state = "running" if program.chimera_id in self._begun else "handed"
+            elif program.finished:
+                state = "done"
+            else:
+                state = "queued"
+            programs.append(
+                {
+                    "id": program.id,
+                    "pid": program.pid,
+                    "name": program.name,
+                    "priority": program.priority,
+                    # 0/None is the "no constraint" sentinel, not a date
+                    "slew_at": program.slew_at or None,
+                    "algorithm": (
+                        ALGORITHM_YAML_NAMES.get(blockpar.sched_algorithm)
+                        if blockpar is not None
+                        else None
+                    ),
+                    "length": obsblock.length if obsblock is not None else None,
+                    "chimera_id": program.chimera_id,
+                    "state": state,
+                }
+            )
+        return programs
+
+    def _status_occurrences(self, session) -> dict:
+        """Pending timed occurrences per project: counts and the next slot."""
+        occurrences = {}
+        rows = (
+            session.query(
+                TimedDB.pid,
+                TimedDB.scheduled,
+                sqla_func.count(TimedDB.id),
+                sqla_func.min(TimedDB.execute_at),
+            )
+            .filter(TimedDB.finished == False)  # noqa: E712
+            .group_by(TimedDB.pid, TimedDB.scheduled)
+            .all()
+        )
+        for pid, scheduled, count, next_at in rows:
+            entry = occurrences.setdefault(
+                pid, {"pending": 0, "committed": 0, "next_execute_at": None}
+            )
+            entry["committed" if scheduled else "pending"] += int(count)
+            if next_at is not None and (
+                entry["next_execute_at"] is None
+                or float(next_at) < entry["next_execute_at"]
+            ):
+                entry["next_execute_at"] = float(next_at)
+        return occurrences
+
+    def _status_log(self, session) -> list[dict]:
+        entries = (
+            session.query(ObservingLog)
+            .order_by(ObservingLog.time.desc(), ObservingLog.id.desc())
+            .limit(STATUS_LOG_TAIL)
+            .all()
+        )
+        return [
+            {
+                "time_utc": entry.time.replace(tzinfo=dt.UTC).isoformat(),
+                "name": entry.name,
+                "priority": entry.priority,
+                "action": entry.action,
+            }
+            for entry in reversed(entries)
+        ]
 
     # ------------------------------------------------------------------
     # proxies

@@ -249,7 +249,7 @@ def test_program_complete_ok_marks_observed(rob, chimera_session):
     assert block.observed is True
     log_entries = session.query(model.ObservingLog).all()
     assert any("Program End" in entry.action for entry in log_entries)
-    assert session.query(model.Program).get(program.id).finished is True
+    assert session.get(model.Program, program.id).finished is True
 
 
 def test_single_program_error_does_not_stop_robobs(rob, chimera_session):
@@ -888,3 +888,105 @@ def test_an_unscheduled_program_is_never_stale(rob, chimera_session):
 
     rob._handle_scheduler_idle()
     assert rob._handed, "an unpinned program was mistaken for a stale one"
+
+
+# ----------------------------------------------------------------------
+# status() night snapshot
+# ----------------------------------------------------------------------
+
+
+def test_status_is_json_safe_and_reports_the_basics(rob):
+    """The payload must cross the bus as JSON unharmed (payload discipline)."""
+    import json
+
+    _populate_program(rob, slew_at=rob._site.mjd() + 0.01)
+    status = rob.status()
+
+    json.dumps(status)
+    assert status["schema"] == 1
+    assert status["robobs"]["state"] == "OFF"
+    assert status["robobs"]["machine"] == "OFF"
+    assert status["robobs"]["consecutive_errors"] == 0
+    assert status["scheduler"]["state"] == "IDLE"
+    assert status["scheduler"]["queue_len"] == 0
+    assert status["night"]["is_night"] is True
+    assert status["errors"] == {}
+
+    [entry] = status["programs"]
+    assert entry["state"] == "queued"
+    assert entry["algorithm"] == "higher"
+    assert entry["length"] == 0.0
+
+
+def test_status_program_states_follow_the_handover_lifecycle(rob):
+    """queued -> handed -> running -> done, as the UI paints them."""
+    # inside FakeSite's night bracket (its fixed-offset twilights put both
+    # dusk and dawn 12 h ahead), so the finished program stays in the window
+    slew_at = rob._site.mjd() + 0.5
+    queued = _populate_program(rob, slew_at=slew_at)
+    handed = _populate_program(rob, slew_at=slew_at)
+    running = _populate_program(rob, slew_at=slew_at)
+    done = _populate_program(rob, slew_at=slew_at)
+
+    session = rob._session()
+    for program, chimera_id in ((handed, 7), (running, 8)):
+        row = session.get(model.Program, program.id)
+        row.finished = True
+        row.chimera_id = chimera_id
+        row.handed_at = rob._site.mjd()
+        rob._handed[chimera_id] = (row, None, None)
+    session.get(model.Program, done.id).finished = True
+    session.commit()
+    rob._begun.add(8)  # only program 8 emitted program_begin
+
+    states = {p["id"]: p["state"] for p in rob.status()["programs"]}
+    assert states[queued.id] == "queued"
+    assert states[handed.id] == "handed"
+    assert states[running.id] == "running"
+    assert states[done.id] == "done"
+
+    by_chimera_id = {h["chimera_id"]: h for h in rob.status()["handed"]}
+    assert by_chimera_id[8]["begun"] is True
+    assert by_chimera_id[7]["begun"] is False
+
+
+def test_status_includes_occurrences_and_the_log_tail(rob):
+    import datetime as dt
+
+    session = rob._session()
+    session.add(model.TimedDB(pid="OPOP", execute_at=61000.5, finished=False))
+    session.add(
+        model.TimedDB(pid="OPOP", execute_at=61000.7, finished=False, scheduled=True)
+    )
+    session.add(model.TimedDB(pid="FOCUS", execute_at=61000.9, finished=True))
+    session.add(
+        model.ObservingLog(
+            time=dt.datetime(2026, 7, 6, 4, 0, 0),
+            target_id=1,
+            name="tgt",
+            priority=1,
+            action="ROBOBS: Program Started",
+        )
+    )
+    session.commit()
+
+    status = rob.status()
+    assert status["occurrences"] == {
+        "OPOP": {"pending": 1, "committed": 1, "next_execute_at": 61000.5}
+    }
+    [entry] = status["log"]
+    assert entry["name"] == "tgt"
+    assert entry["action"] == "ROBOBS: Program Started"
+    assert entry["time_utc"].startswith("2026-07-06T04:00:00")
+
+
+def test_status_survives_a_dead_scheduler_proxy(rob):
+    """A status query must never wedge on an unreachable scheduler."""
+
+    def boom():
+        raise RuntimeError("bus down")
+
+    rob.get_scheduler = boom
+    status = rob.status()
+    assert "bus down" in status["scheduler"]["error"]
+    assert status["robobs"]["state"] == "OFF"

@@ -150,10 +150,13 @@ class RotatingSite(FakeSite):
 class FakeSchedulerProxy:
     """Records the calls the RobObs machine makes on the chimera scheduler."""
 
-    def __init__(self, running_program=None):
+    def __init__(self, running_program=None, state="IDLE"):
         self.calls = []
         #: what current_program() answers (the core's JSON-safe snapshot)
         self.running_program = running_program
+        #: what state() answers (the core's State StrEnum crosses the bus
+        #: as its string value)
+        self.machine_state = state
 
     def start(self):
         self.calls.append("start")
@@ -166,6 +169,14 @@ class FakeSchedulerProxy:
     def current_program(self):
         self.calls.append("current_program")
         return self.running_program
+
+    def current_action(self):
+        self.calls.append("current_action")
+        return None
+
+    def state(self):
+        self.calls.append("state")
+        return self.machine_state
 
 
 class FakeBus:
