@@ -241,6 +241,24 @@ def main() -> None:
         fail(f"expected 1 finished program, found {finished}")
     print("    PASS: program marked finished")
 
+    # --- assertion: the status() night snapshot survives the real bus
+    step("status(): the phase-1 night snapshot over the bus")
+    snapshot = robobs.status()
+    if snapshot.get("schema") != 1:
+        fail(f"status(): bad schema: {snapshot.get('schema')!r}")
+    if snapshot["robobs"]["state"] != "ON":
+        fail(f"status(): robobs should be ON, got {snapshot['robobs']}")
+    if snapshot["errors"]:
+        fail(f"status(): sections failed: {snapshot['errors']}")
+    if not snapshot["night"] or not snapshot["night"]["is_night"]:
+        fail(f"status(): expected night time, got {snapshot['night']}")
+    program_states = {p["id"]: p["state"] for p in snapshot["programs"]}
+    if program_states.get(program.id) != "done":
+        fail(f"status(): finished program should be 'done', got {program_states}")
+    if not any("Program End" in entry["action"] for entry in snapshot["log"]):
+        fail("status(): observing-log tail missing the Program End entry")
+    print("    PASS: status() snapshot over the bus")
+
     # --- assertion 3: after stop, a pending program must NOT execute
     step("daytime-zombie guard: stop robobs, seed another program, wake")
     robobs.stop()

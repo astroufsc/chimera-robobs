@@ -21,6 +21,7 @@ Commands that talk to a running chimera server:
 
     chimera-robobs make-queue --pid PID [--pid-config file.yaml] [time options]
     chimera-robobs process-queue [time options]        (offline simulation)
+    chimera-robobs status [--json] [--watch [s]]       (night-state panel)
     chimera-robobs start | stop | wake | monitor
 
 The YAML inputs use the canonical snake_case dialect with readable
@@ -52,6 +53,7 @@ from chimera.util.position import Position
 from sqlalchemy import and_, desc, or_
 from sqlalchemy import func as sqla_func
 
+from chimera_robobs.cli.status import cmd_status
 from chimera_robobs.scheduling.algorithms import (
     build_algorithms,
     parse_algorithm_id,
@@ -1880,12 +1882,11 @@ def _process_queue(args, factory) -> int:
 # ----------------------------------------------------------------------
 
 
-def _connect(args, location: str):
+def _client_bus(args):
     import threading
     import time
 
     from chimera.core.bus import Bus
-    from chimera.core.proxy import Proxy
 
     bus = Bus(f"tcp://{args.host}:{random.randint(10000, 60000)}")
     # the client bus must run its receive loop, or replies never arrive
@@ -1895,6 +1896,12 @@ def _connect(args, location: str):
         started.wait(5)
     else:
         time.sleep(0.5)
+    return bus
+
+
+def _resolve_proxy(bus, args, location: str):
+    from chimera.core.proxy import Proxy
+
     url = f"tcp://{args.host}:{args.port}{location}"
     # every CLI call here is short (ephemeris lookups, start/stop): bound
     # them so a lost bus response fails loudly instead of hanging the CLI
@@ -1905,7 +1912,12 @@ def _connect(args, location: str):
     except TypeError:
         proxy = Proxy(url, bus)
     proxy.resolve()
-    return bus, proxy
+    return proxy
+
+
+def _connect(args, location: str):
+    bus = _client_bus(args)
+    return bus, _resolve_proxy(bus, args, location)
 
 
 def _online(args, call) -> int:
@@ -2109,6 +2121,27 @@ def main(argv: list[str] | None = None) -> int:
     )
     _add_time_options(p)
     p.set_defaults(func=cmd_process_queue)
+
+    p = sub.add_parser(
+        "status",
+        help="show the current state of the night (robobs, scheduler, "
+        "queue, observing log)",
+    )
+    p.add_argument(
+        "--json",
+        action="store_true",
+        help="dump the raw RobObs.status() snapshot as JSON",
+    )
+    p.add_argument(
+        "--watch",
+        nargs="?",
+        type=float,
+        const=5.0,
+        default=None,
+        metavar="SECONDS",
+        help="redraw the panel every SECONDS (default 5) until interrupted",
+    )
+    p.set_defaults(func=cmd_status)
 
     p = sub.add_parser("observing-log", help="show the observing log")
     p.add_argument("--start", default=None, help="only entries after this time")
